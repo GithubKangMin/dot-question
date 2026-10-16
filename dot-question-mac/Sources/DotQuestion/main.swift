@@ -80,6 +80,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private let menuAnswer = NSButton(checkboxWithTitle: "메뉴 막대에 선택 답 표시", target: nil, action: nil)
     private let menuStyle = NSPopUpButton(frame: .zero, pullsDown: false)
     private var lastOptions: [String] = []
+    private var wifiAnswerState: WifiAnswerState = .idle
     private let characterStyle = NSPopUpButton(frame: .zero, pullsDown: false)
     private let reduceMotion = NSButton(checkboxWithTitle: "움직임 줄이기 (정적 번호 표시)", target: nil, action: nil)
     private var armedReturnKey: HotKey?
@@ -104,8 +105,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             model.stringValue = "qwen2.5:7b"
         }
         buildWindow()
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        statusItem.button?.title = "Q?"
+        statusItem = NSStatusBar.system.statusItem(withLength: usesPersistentWifi ? AnswerStatusIcon.wifiStatusItemLength : NSStatusItem.variableLength)
         renderMenuAnswer()
         let menu = NSMenu()
         let open = NSMenuItem(title: "질문 창 열기", action: #selector(showWindow), keyEquivalent: "")
@@ -125,7 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         if code != 0 { status.stringValue = "단축키 등록 실패 (\(code)). 메뉴의 영역 캡처를 이용하세요." }
         if RuntimeConfiguration.isLiveTest {
             let ready: [String: Any] = ["hotkeyStatus": code, "screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
-                                        "windowVisible": window.isVisible, "model": model.stringValue]
+                                        "windowVisible": window.isVisible, "model": model.stringValue,
+                                        "wifiFilledBars": wifiAnswerState.filledBars, "persistentWifi": usesPersistentWifi,
+                                        "statusItemWidth": statusItem.length, "menuTitle": statusItem.button?.title ?? ""]
             writeLiveEvidence(ready, filename: "app-ready.json")
         }
         if let error = documents.loadError { documentStatus.stringValue = error }
@@ -182,6 +184,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         groundedOnly.state = .on
         lastChoice = result.selectedChoice
         lastOptions = prepared.question.choices.map { $0.label }
+        wifiAnswerState = WifiAnswerState(choice: lastChoice, options: lastOptions)
         menuAnswer.state = .on
         renderMenuAnswer()
         status.stringValue = "CI 합성 자료 · 고정 응답 검증 완료 · 네트워크/API 호출 없음"
@@ -332,12 +335,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let outputSettings = NSStackView(views: [autoCopy, menuAnswer]); outputSettings.spacing = 8
         settingsPanel.addArrangedSubview(outputSettings)
         settingsPanel.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "메뉴 답 표시 모양"), menuStyle]))
-        settingsPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "앱 자체 답 표시입니다. 실제 Wi-Fi/배터리 상태가 아닙니다. 보기 순서 1–5 → 막대 1–5칸 (6–10은 숫자), 1–10 → 10–100%."))
+        settingsPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "앱 자체 답 표시입니다. 실제 Wi-Fi/배터리 상태가 아닙니다. Wi-Fi형은 항상 같은 5칸: 대기·처리·오류는 0칸, 보기 순서 1–5는 해당 칸을 채워 다음 명령까지 유지합니다. 6–10은 0칸과 메뉴 상세로 표시합니다. 배터리형은 1–10 → 10–100%."))
         characterStyle.addItems(withTitles: ["캐릭터 끄기", "고양이 · 꼬리 흔들기", "피카츄 · 전기 펄스"])
         characterStyle.target = self; characterStyle.action = #selector(outputModeChanged)
         reduceMotion.target = self; reduceMotion.action = #selector(outputModeChanged)
         settingsPanel.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "메뉴 캐릭터"), characterStyle, reduceMotion]))
-        settingsPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "검증된 보기 순서만큼 초당 1회, 최대 10회 움직인 뒤 선택한 메뉴 답 모양으로 복원됩니다. 메뉴 답 끄기 상태에서는 캐릭터와 번호를 유지합니다. 시스템 동작 줄이기도 따릅니다."))
+        settingsPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "검증된 보기 순서만큼 초당 1회, 최대 10회 움직인 뒤 선택한 메뉴 답 모양으로 복원됩니다. Wi-Fi형에서는 막대를 유지하며 캐릭터로 바꾸지 않습니다. 다른 모양의 메뉴 답 끄기 상태에서는 캐릭터와 번호를 유지합니다. 시스템 동작 줄이기도 따릅니다."))
         for checkbox in [menuAnswer] { checkbox.target = self; checkbox.action = #selector(outputModeChanged) }
         settingsPanel.addArrangedSubview(NSTextField(labelWithString: "Enter 준비를 켜면 단축키 후 10초 동안 Return을 캡처용으로 사용합니다. Esc로 해제. 표시는 화면 공유에 보일 수 있습니다."))
         root.addArrangedSubview(NSTextField(labelWithString: "질문 · OCR은 오인식할 수 있어요"))
@@ -422,9 +425,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         guard NSApp.modalWindow == nil else { NSSound.beep(); return }
         guard !busy else { NSSound.beep(); return }
         requestOrigin = origin
-        resetOutput()
+        resetOutput(wifiState: .pending)
         if RuntimeConfiguration.isLiveTest {
             writeLiveEvidence(["ordinal": AnswerIndicator(choice: lastChoice, options: lastOptions)?.ordinal ?? 0,
+                               "wifiFilledBars": wifiAnswerState.filledBars, "persistentWifi": usesPersistentWifi,
+                               "statusItemWidth": statusItem.length, "menuTitle": statusItem.button?.title ?? "",
                                "windowVisible": window.isVisible, "phase": "capture-started-after-output-reset"],
                               filename: "live-start.json")
         }
@@ -476,7 +481,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                         switch result {
                         case .success(let text):
                             self.question.string = text
-                            self.answer.string = ""; self.resetOutput()
+                            self.answer.string = ""; self.resetOutput(wifiState: .pending)
                             if origin == .quick && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 self.activeCapture = false; self.setBusy(false)
                                 self.prepareQuestion(origin: origin)
@@ -508,7 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private func prepareQuestion(origin: RequestOrigin) {
         disarmReturn()
         guard !busy else { return }
-        resetOutput()
+        resetOutput(wifiState: .pending)
         requestOrigin = origin
         let rawQuestion = question.string
         let requiresSources = groundedOnly.state == .on
@@ -580,7 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(copyText, forType: .string)
                     }
-                    self.finish(self.lastChoice == nil && self.requestOrigin == .quick ? "확정된 선택 답이 없습니다. 질문 창에서 답변과 불확실성 설명을 확인하세요." : "답변 완료. 출처 표시는 원문 대조를 돕는 기능이며 정확성을 보증하지 않습니다.", successful: self.requestOrigin != .quick || self.lastChoice != nil)
+                    self.finish(self.lastChoice == nil && (self.requestOrigin == .quick || self.usesPersistentWifi) ? "확정된 선택 답이 없습니다. 질문 창에서 답변과 불확실성 설명을 확인하세요." : "답변 완료. 출처 표시는 원문 대조를 돕는 기능이며 정확성을 보증하지 않습니다.", successful: self.requestOrigin != .quick || self.lastChoice != nil)
                 } catch {
                     self.answer.string = "[형식/선택지/출처 검증 실패: 자동 복사와 번호 표시는 하지 않습니다.]\n\(error.localizedDescription)\n\n모델 원문 (미검증):\n\(text)"
                     self.resetOutput(); self.finish("응답 검증 실패. 원문을 검토하거나 다시 질문하세요.")
@@ -597,7 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                 RuntimeConfiguration.preferences.set(endpoint.stringValue, forKey: "endpoint")
                 RuntimeConfiguration.preferences.set(model.stringValue, forKey: "model")
             }
-            answer.string = ""; resetOutput(); setBusy(true)
+            answer.string = ""; resetOutput(wifiState: .pending); setBusy(true)
             status.stringValue = useAPI ? "OpenAI API에서 풀이 중…" : "로컬 Ollama에서 풀이 중…"
         } catch { finish(error.localizedDescription) }
     }
@@ -612,9 +617,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             NSUserNotificationCenter.default.deliver(notification)
             NSSound.beep()
         }
+        if usesPersistentWifi {
+            if !successful {
+                wifiAnswerState = .unavailable
+                menuMessage = message
+            } else if let indicator = AnswerIndicator(choice: lastChoice, options: lastOptions), let choice = lastChoice {
+                menuStatus.title = "선택 답 \(choice) · 보기 순서 \(indicator.ordinal)" + (indicator.wifiBars == nil ? " · 5칸 범위 밖: 상세 답을 확인하세요." : " · 다음 명령까지 유지")
+            }
+            renderMenuAnswer()
+        }
         if requestOrigin.shouldRevealWindow && !closingWindow { showWindow() }
         if RuntimeConfiguration.isLiveTest {
             writeLiveEvidence(["successful": successful, "ordinal": AnswerIndicator(choice: lastChoice, options: lastOptions)?.ordinal ?? 0,
+                               "wifiFilledBars": wifiAnswerState.filledBars, "persistentWifi": usesPersistentWifi,
+                               "statusItemWidth": statusItem.length, "menuTitle": statusItem.button?.title ?? "",
                                "windowVisible": window.isVisible, "questionOCR": question.string,
                                "validatedAnswer": answer.string, "status": message,
                                "parsedChoiceLabels": MCQParser.parse(question.string).choices.map { $0.label },
@@ -662,6 +678,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private func armReturn() {
         stopCharacterAnimation()
         disarmReturn()
+        if usesPersistentWifi { resetOutput(wifiState: .pending) }
         let returnKey = HotKey { [weak self] in
             guard let self else { return }
             self.disarmReturn()
@@ -679,8 +696,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             finish("Enter 준비 키 등록 실패. 체크를 끄고 보조키 단축키로 직접 캡처하세요."); return
         }
         armedReturnKey = returnKey; armedEscapeKey = escapeKey
-        statusItem.button?.image = nil
-        statusItem.button?.title = "Q ⏎ 10s"
+        if usesPersistentWifi {
+            menuStatus.title = "Enter 캡처 준비 · 10초 안에 Return, Esc로 취소"
+            renderMenuAnswer()
+        } else {
+            statusItem.button?.image = nil
+            statusItem.button?.title = "Q ⏎ 10s"
+        }
         status.stringValue = "10초 동안 Enter 캡처 준비. 다른 앱의 질문 위에 커서를 놓고 Return을 누르세요. Esc로 취소."
         let timer = Timer(timeInterval: 10, repeats: false) { [weak self] _ in
             self?.disarmReturn(); self?.status.stringValue = "Enter 준비 시간이 끝났습니다."
@@ -745,15 +767,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         do { try documents.remove(document.id); refreshDocuments(); status.stringValue = "가져온 자료를 삭제했습니다." }
         catch { status.stringValue = error.localizedDescription }
     }
-    private func resetOutput() {
+    private func resetOutput(wifiState: WifiAnswerState = .idle) {
         stopCharacterAnimation(); lastChoice = nil; lastOptions = []; menuMessage = nil
-        menuStatus.title = "대기 중 · 아직 답 없음"
+        wifiAnswerState = wifiState
+        menuStatus.title = wifiState == .pending ? "처리 중 · 아직 확정된 답 없음" : "대기 중 · 아직 답 없음"
         renderMenuAnswer()
     }
+    private var usesPersistentWifi: Bool { menuStyle.indexOfSelectedItem == 1 }
     private func renderMenuAnswer() {
         guard let button = statusItem?.button else { return }
+        if usesPersistentWifi {
+            // Fixed width, image-only alignment, and no Q/Q?/Q! or empty-image state.
+            statusItem.length = AnswerStatusIcon.wifiStatusItemLength
+            button.title = ""
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleNone
+            button.image = AnswerStatusIcon.wifi(bars: menuAnswer.state == .on ? wifiAnswerState.filledBars : 0)
+            let detail = menuAnswer.state == .on ? (menuMessage ?? menuStatus.title) : "답 표시 꺼짐 · 0칸"
+            button.toolTip = "dot question • \(detail) • not actual battery/network · 실제 Wi-Fi 상태 아님"
+            return
+        }
+        statusItem.length = NSStatusItem.variableLength
         button.image = nil
         button.imagePosition = .imageLeading
+        button.imageScaling = .scaleProportionallyDown
         button.title = "Q?"
         button.toolTip = "dot question • answer unknown • not actual battery/network · 실제 배터리/네트워크 상태 아님"
         if let message = menuMessage {
@@ -770,13 +807,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             return
         }
         switch menuStyle.indexOfSelectedItem {
-        case 1:
-            if let bars = indicator.wifiBars {
-                button.image = AnswerStatusIcon.wifi(bars: bars)
-                button.title = "Q"
-            } else {
-                button.title = "Q \(indicator.ordinal)"
-            }
         case 2:
             button.image = AnswerStatusIcon.battery(percent: indicator.batteryPercent)
             button.title = "Q \(indicator.batteryPercent)%"
@@ -796,6 +826,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
     func textDidChange(_ notification: Notification) {
         guard let view = notification.object as? NSTextView, view === question else { return }
+        // Draft edits are not a new capture/send command.
+        guard !usesPersistentWifi else { return }
         resetOutput()
     }
     @objc private func outputModeChanged() {
@@ -810,8 +842,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private func showChoice(_ choice: String?, options: [String]) {
         stopCharacterAnimation()
         lastChoice = choice; lastOptions = options
+        wifiAnswerState = WifiAnswerState(choice: choice, options: options)
         renderMenuAnswer()
-        guard selectedCharacter != .off,
+        guard !usesPersistentWifi, selectedCharacter != .off,
               let indicator = AnswerIndicator(choice: choice, options: options) else { return }
         guard !motionReduced else { return }
         animationCount = indicator.ordinal; animationStep = 0
@@ -835,7 +868,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         return .terminateNow
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
-    func windowWillClose(_ notification: Notification) { closingWindow = true; cancelWork(); window.orderOut(nil) }
+    func windowWillClose(_ notification: Notification) {
+        closingWindow = true
+        // Closing settings does not erase a completed Wi-Fi answer.
+        if usesPersistentWifi && (!busy || importing) { disarmReturn() }
+        else { cancelWork() }
+        window.orderOut(nil)
+    }
     func applicationWillTerminate(_ notification: Notification) { NSWorkspace.shared.notificationCenter.removeObserver(self); disarmReturn(); animationTimer?.invalidate(); apiKey.stringValue = ""; apiClient.cancel(); client.cancel(); capture.cancel(); capture.cleanup(); hotKey = nil }
 }
 

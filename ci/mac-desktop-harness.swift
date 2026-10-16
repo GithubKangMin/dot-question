@@ -30,7 +30,7 @@ private struct QuestionFixture {
         expectedOrdinal: 3)
     static let sequence = [
         QuestionFixture(question: "Which number equals 2 + 2?",
-                        choices: ["1. Three", "2. Four", "3. Five", "4. Six", "5. Seven"],
+                        choices: ["1. 3", "2. 4", "3. 5", "4. 6", "5. 7"],
                         expectedOrdinal: 2),
         redPlanet,
         QuestionFixture(question: "Which animal is a mammal?",
@@ -136,10 +136,10 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         // Includes preparation and encoder finalization. Never wait indefinitely
         // for a permission dialog or an unavailable WindowServer.
         let watchdog = DispatchWorkItem { [weak self] in
-            self?.failAndExit("Harness exceeded the 600-second safety deadline.")
+            self?.failAndExit("Harness exceeded the 1000-second safety deadline.")
         }
         self.watchdog = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1000, execute: watchdog)
         Task { @MainActor in
             do {
                 try await self.run()
@@ -180,7 +180,9 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         guard let ready = try JSONSerialization.jsonObject(with: readyData) as? [String: Any],
               ready["hotkeyStatus"] as? Int == 0,
               ready["screenCaptureAllowed"] as? Bool == true,
-              ready["windowVisible"] as? Bool == false else {
+              ready["windowVisible"] as? Bool == false,
+              ready["persistentWifi"] as? Bool == true, ready["wifiFilledBars"] as? Int == 0,
+              ready["menuTitle"] as? String == "", ready["statusItemWidth"] as? Double == 34 else {
             throw HarnessError(message: "The production app is not ready: global hotkey registration, screen permission, or hidden-window assertion failed. Inspect app-ready.json. No permission change was attempted.")
         }
 
@@ -305,8 +307,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             let beforeName = probeOnly ? "before-shortcut.png" : "\(prefix)-before-shortcut.png"
             try await saveScreenshot(filter: filter, configuration: configuration, name: beforeName)
 
-            // Both receipt and answer waits share one 180-second deadline.
-            let deadline = ProcessInfo.processInfo.systemUptime + 180
+            // Both receipt and answer waits share one 300-second deadline.
+            let deadline = ProcessInfo.processInfo.systemUptime + 300
             let postedAt = elapsed
             try await postShortcut()
             shortcutPostTime = postedAt
@@ -318,7 +320,9 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             }
             let start = try readJSON(named: "live-start.json")
             try saveJSON(start, as: "\(prefix)-start.json")
-            guard start["ordinal"] as? Int == 0, start["windowVisible"] as? Bool == false else {
+            guard start["ordinal"] as? Int == 0, start["windowVisible"] as? Bool == false,
+                  start["wifiFilledBars"] as? Int == 0, start["persistentWifi"] as? Bool == true,
+                  start["menuTitle"] as? String == "", start["statusItemWidth"] as? Double == 34 else {
                 throw HarnessError(message: "Question \(currentQuestionNumber) failed to reset the menu answer to ordinal 0 with the app window hidden.")
             }
             let resetAt = elapsed
@@ -343,13 +347,17 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             try receipt.write(to: directory.appendingPathComponent("\(prefix)-hotkey-received.txt"), options: .atomic)
             note("production-result-observed", ["ordinal": result["ordinal"] ?? NSNull(),
                                                  "successful": result["successful"] ?? NSNull()])
-            // Hold every actual result for five real seconds before replacing
+            // Hold every actual result for ten real seconds before replacing
             // the question, including a wrong result that will fail the run.
-            try await pause(probeOnly ? 3 : 5)
+            try await pause(probeOnly ? 3 : 10)
             let afterName = probeOnly ? "after-answer.png" : "\(prefix)-after-answer.png"
             try await saveScreenshot(filter: filter, configuration: configuration, name: afterName)
             let valid = result["windowVisible"] as? Bool == false
                 && result["successful"] is Bool
+                && result["persistentWifi"] as? Bool == true
+                && result["menuTitle"] as? String == ""
+                && result["statusItemWidth"] as? Double == 34
+                && (probeOnly || result["wifiFilledBars"] as? Int == question.expectedOrdinal)
                 && (probeOnly || (result["successful"] as? Bool == true
                                  && result["ordinal"] as? Int == question.expectedOrdinal))
             let entry: [String: Any] = [

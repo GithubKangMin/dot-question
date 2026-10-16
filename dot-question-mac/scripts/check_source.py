@@ -13,7 +13,7 @@ class SourceChecks(unittest.TestCase):
             self.assertTrue((ROOT / name).is_file(), name)
     def test_privacy_guards_present(self):
         s = (ROOT / 'Sources/DotQuestion/Services.swift').read_text()
-        for token in ['completionHandler(nil)', 'connectionProxyDictionary = [:]', 'remote_model == nil', 'remote_host == nil', 'api/tags', 'timeoutIntervalForResource = 180', 'removeItem(at: directory)']:
+        for token in ['completionHandler(nil)', 'connectionProxyDictionary = [:]', 'remote_model == nil', 'remote_host == nil', 'api/tags', 'timeoutIntervalForResource = RuntimeConfiguration.isLiveTest ? 300 : 180', 'removeItem(at: directory)']:
             self.assertIn(token, s)
         core = (ROOT / 'Sources/QuestionCore/LocalEndpoint.swift').read_text()
         for token in ['c.user == nil', 'c.password == nil', 'c.query == nil', 'c.fragment == nil', 'contains("cloud")']:
@@ -78,7 +78,7 @@ class SourceChecks(unittest.TestCase):
                            ('func textDidChange(', 'private func outputModeChanged()'),
                            ('func applicationShouldTerminate(', 'func windowWillClose(')]:
             section = ui[ui.index(start):ui.index(end)]
-            self.assertIn('resetOutput()', section, start)
+            self.assertIn('resetOutput(', section, start)
         for start, end in [('private func outputModeChanged()', 'private func showChoice('),
                            ('private func armReturn()', 'private func disarmReturn()')]:
             self.assertIn('stopCharacterAnimation()', ui[ui.index(start):ui.index(end)])
@@ -107,6 +107,23 @@ class SourceChecks(unittest.TestCase):
         self.assertIn('NSUserNotificationCenter.default.deliver(notification)', finish)
         self.assertIn('resetOutput()', finish)
         self.assertTrue((ROOT / 'Tests/QuestionCoreTests/RequestOriginTests.swift').is_file())
+    def test_wifi_is_persistent_fixed_width_and_never_replaced(self):
+        ui = (ROOT / 'Sources/DotQuestion/main.swift').read_text()
+        render = ui[ui.index('private func renderMenuAnswer()'):ui.index('private var selectedCharacter:')]
+        wifi = render[render.index('if usesPersistentWifi {'):render.index('statusItem.length = NSStatusItem.variableLength')]
+        for token in ['statusItem.length = AnswerStatusIcon.wifiStatusItemLength', 'button.title = ""',
+                      'button.imagePosition = .imageOnly', 'button.imageScaling = .scaleNone',
+                      'wifiAnswerState.filledBars', 'return']:
+            self.assertIn(token, wifi)
+        self.assertNotIn('button.image = nil', wifi)
+        self.assertNotIn('button.title = "Q', wifi)
+        self.assertNotIn('CharacterStatusIcon.image', wifi)
+        for token in ['guard !usesPersistentWifi else { return }',
+                      'guard !usesPersistentWifi, selectedCharacter != .off',
+                      'if usesPersistentWifi && (!busy || importing)',
+                      'resetOutput(wifiState: .pending)', '"wifiFilledBars"', '"persistentWifi"']:
+            self.assertIn(token, ui)
+        self.assertTrue((ROOT / 'Tests/DotQuestionTests/AnswerStatusIconTests.swift').is_file())
     def test_screenshot_evidence_uses_visible_views(self):
         ui = (ROOT / 'Sources/DotQuestion/main.swift').read_text()
         capture = ui[ui.index('private func saveSmokeScreenshots'):ui.index('private func buildWindow')]

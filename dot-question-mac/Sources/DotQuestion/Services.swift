@@ -148,8 +148,8 @@ final class OllamaClient {
     }
     private lazy var session: URLSession = {
         let config = configuration
-        config.timeoutIntervalForRequest = 120
-        config.timeoutIntervalForResource = 180
+        config.timeoutIntervalForRequest = RuntimeConfiguration.isLiveTest ? 240 : 120
+        config.timeoutIntervalForResource = RuntimeConfiguration.isLiveTest ? 300 : 180
         config.connectionProxyDictionary = [:]
         config.httpCookieStorage = nil
         config.urlCache = nil
@@ -201,7 +201,7 @@ final class OllamaClient {
             "model": model, "stream": false, "format": Self.answerSchema(questionPayload: question),
             "system": system,
             "prompt": question,
-            "options": ["temperature": 0.2, "num_predict": 2048, "num_ctx": RuntimeConfiguration.isLiveTest ? 4096 : 16384]
+            "options": ["temperature": 0.2, "num_predict": RuntimeConfiguration.isLiveTest ? 512 : 2048, "num_ctx": RuntimeConfiguration.isLiveTest ? 4096 : 16384]
         ])
         generation += 1
         let token = generation

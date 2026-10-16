@@ -2,13 +2,18 @@ import AppKit
 
 /// Template images drawn by this app. No Wi-Fi or battery system state is accessed.
 enum AnswerStatusIcon {
+    static let wifiImageSize = NSSize(width: 26, height: 18)
+    static let wifiStatusItemLength: CGFloat = 34
+
     static func wifi(bars: Int) -> NSImage {
-        let image = NSImage(size: NSSize(width: 26, height: 18), flipped: false) { _ in
+        let filledBars = max(0, min(5, bars))
+        let image = NSImage(size: wifiImageSize, flipped: false) { _ in
+            // All five silhouettes remain visible even while none are filled.
             for index in 0..<5 {
                 let height = CGFloat(4 + index * 3)
                 let rect = NSRect(x: CGFloat(index * 5), y: 1, width: 3, height: height)
                 let path = NSBezierPath(roundedRect: rect, xRadius: 0.6, yRadius: 0.6)
-                NSColor.black.withAlphaComponent(index < bars ? 1 : 0.22).setFill()
+                NSColor.black.withAlphaComponent(index < filledBars ? 1 : 0.22).setFill()
                 path.fill()
             }
             return true
