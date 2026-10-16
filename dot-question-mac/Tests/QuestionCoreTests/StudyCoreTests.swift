@@ -15,6 +15,18 @@ final class StudyCoreTests: XCTestCase {
         return String(data: data, encoding: .utf8)!
     }
 
+    func testLiveRecordingQuestionsPreserveAllFiveLabels() throws {
+        let questions = [
+            "Which number equals 2 + 2?\n1. 3\n2. 4\n3. 5\n4. 6\n5. 7",
+            "Which planet is known as Red Planet?\n1. Venus\n2. Jupiter\n3. Mars\n4. Saturn\n5. Neptune",
+            "Which animal is a mammal?\n1. Trout\n2. Frog\n3. Lizard\n4. Eagle\n5. Dolphin"
+        ]
+        for question in questions {
+            let prompt = try StudyPromptBuilder.build(question: question, sources: [])
+            XCTAssertEqual(prompt.question.choices.map(\.label), ["1", "2", "3", "4", "5"])
+            XCTAssertTrue(prompt.question.choices.allSatisfy { !$0.text.isEmpty })
+        }
+    }
     func testAutomaticOutputOnlyUsesValidatedCertainAnswers() throws {
         let question = MCQParser.parse("광합성 에너지는?\n1. 빛\n2. 소리")
         let certain = try StructuredAnswerParser.parse(response(choice: "1"), question: question, sources: [])

@@ -17,6 +17,28 @@ private struct HarnessError: LocalizedError {
     var errorDescription: String? { message }
 }
 
+// Expected ordinals are test assertions only. They are never drawn, passed to
+// DotQuestion, or included in a model prompt.
+private struct QuestionFixture {
+    let question: String
+    let choices: [String]
+    let expectedOrdinal: Int
+
+    static let redPlanet = QuestionFixture(
+        question: "Which planet is known as Red Planet?",
+        choices: ["1. Venus", "2. Jupiter", "3. Mars", "4. Saturn", "5. Neptune"],
+        expectedOrdinal: 3)
+    static let sequence = [
+        QuestionFixture(question: "Which number equals 2 + 2?",
+                        choices: ["1. 3", "2. 4", "3. 5", "4. 6", "5. 7"],
+                        expectedOrdinal: 2),
+        redPlanet,
+        QuestionFixture(question: "Which animal is a mammal?",
+                        choices: ["1. Trout", "2. Frog", "3. Lizard", "4. Eagle", "5. Dolphin"],
+                        expectedOrdinal: 5)
+    ]
+}
+
 private func permissionReport() -> [String: Any] {
     ["screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
      "postEventAllowed": CGPreflightPostEventAccess(),
@@ -42,6 +64,11 @@ private final class QuestionWindow: NSWindow {
 @MainActor
 private final class QuestionView: NSView {
     override var isOpaque: Bool { true }
+    var question = ""
+    var choices: [String] = []
+    var questionNumber = 1
+    var questionCount = 1
+    var elapsedSeconds: TimeInterval = 0
 
     override func draw(_ dirtyRect: NSRect) {
         NSColor.white.setFill()
@@ -49,7 +76,6 @@ private final class QuestionView: NSView {
         let width = min(780.0, bounds.width - 64)
         let x = (bounds.width - width) / 2
         let top = bounds.midY + 170
-        let question = "Which planet is known as Red Planet?"
         let questionAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 31, weight: .semibold),
             .foregroundColor: NSColor.black]
@@ -58,11 +84,19 @@ private final class QuestionView: NSView {
             withAttributes: questionAttributes)
         let choiceAttributes: [NSAttributedString.Key: Any] = [
             .font: NSFont.systemFont(ofSize: 30), .foregroundColor: NSColor.black]
-        for (index, choice) in ["1. Venus", "2. Jupiter", "3. Mars", "4. Saturn", "5. Neptune"].enumerated() {
+        for (index, choice) in choices.enumerated() {
             (choice as NSString).draw(
                 at: NSPoint(x: x, y: top - 65 - CGFloat(index * 55)),
                 withAttributes: choiceAttributes)
         }
+        // This clock is ordinary live window content, captured by the same
+        // display stream. Its changing pixels keep static waits visible in the
+        // recording; no frames, time labels, or cuts are added after capture.
+        let clock = String(format: "Question %d/%d   Elapsed %06.1fs", questionNumber, questionCount, elapsedSeconds)
+        (clock as NSString).draw(
+            at: NSPoint(x: max(16, bounds.width - 375), y: 16),
+            withAttributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 16, weight: .regular),
+                             .foregroundColor: NSColor.darkGray])
     }
 }
 
@@ -72,6 +106,9 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
     private let directory: URL
     private let probeOnly: Bool
     private var fixture: QuestionWindow?
+    private var fixtureView: QuestionView?
+    private var clockTimer: Timer?
+    private var currentQuestionNumber = 0
     private var stream: SCStream?
     private var recording: SCRecordingOutput?
     private var recordingStarted = false
@@ -85,6 +122,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
     private var resultTime: TimeInterval?
     private var captureDescription: [String: Any] = [:]
     private var result: [String: Any] = [:]
+    private var questionResults: [[String: Any]] = []
+    private var recordingStopTime: TimeInterval?
     private var watchdog: DispatchWorkItem?
 
     init(directory: URL, probeOnly: Bool) {
@@ -97,14 +136,15 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         // Includes preparation and encoder finalization. Never wait indefinitely
         // for a permission dialog or an unavailable WindowServer.
         let watchdog = DispatchWorkItem { [weak self] in
-            self?.failAndExit("Harness exceeded the 240-second safety deadline.")
+            self?.failAndExit("Harness exceeded the 600-second safety deadline.")
         }
         self.watchdog = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + 240, execute: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 600, execute: watchdog)
         Task { @MainActor in
             do {
                 try await self.run()
                 self.watchdog?.cancel()
+                self.clockTimer?.invalidate()
                 self.fixture?.orderOut(nil)
                 exit(0)
             } catch {
@@ -128,7 +168,7 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             throw HarnessError(message: "Required Screen Recording or event-posting access is absent. No access request or settings change was attempted.")
         }
         // Reusing evidence from another invocation could falsely pass the test.
-        for name in ["actual-desktop.mp4", "hotkey-received.txt", "live-result.json", "harness-result.json"] {
+        for name in ["actual-desktop.mp4", "hotkey-received.txt", "live-start.json", "live-result.json", "harness-result.json"] {
             guard !FileManager.default.fileExists(atPath: directory.appendingPathComponent(name).path) else {
                 throw HarnessError(message: "Refusing existing evidence file: \(name). Use a fresh output directory.")
             }
@@ -150,8 +190,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         let displayID = CGMainDisplayID()
         guard let screen = NSScreen.screens.first(where: {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
-        }), screen.visibleFrame.width >= 900, screen.visibleFrame.height >= 600 else {
-            throw HarnessError(message: "A visible desktop at least 900 by 600 points is required.")
+        }), screen.visibleFrame.width >= 900, screen.visibleFrame.height >= 680 else {
+            throw HarnessError(message: "A visible desktop at least 900 by 680 points is required, so the live clock stays below the centered 900 by 600 OCR region.")
         }
         let window = QuestionWindow(contentRect: screen.visibleFrame, styleMask: .borderless,
                                     backing: .buffered, defer: false, screen: screen)
@@ -161,10 +201,27 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         window.isOpaque = true
         window.hasShadow = false
         window.isReleasedWhenClosed = false
-        window.contentView = QuestionView(frame: NSRect(origin: .zero, size: screen.visibleFrame.size))
+        let questions = probeOnly ? [QuestionFixture.redPlanet] : QuestionFixture.sequence
+        let view = QuestionView(frame: NSRect(origin: .zero, size: screen.visibleFrame.size))
+        view.question = questions[0].question
+        view.choices = questions[0].choices
+        view.questionCount = questions.count
+        view.elapsedSeconds = elapsed
+        window.contentView = view
+        fixtureView = view
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         fixture = window
+        let clockTimer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, let view = self.fixtureView else { return }
+                view.elapsedSeconds = self.elapsed
+                view.needsDisplay = true
+                view.displayIfNeeded()
+            }
+        }
+        self.clockTimer = clockTimer
+        RunLoop.main.add(clockTimer, forMode: .common)
         window.contentView?.displayIfNeeded()
         let displayBounds = CGDisplayBounds(displayID)
         let point = CGPoint(x: displayBounds.minX + window.frame.midX - screen.frame.minX,
@@ -211,6 +268,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             "displayID": displayID,
             "pixelWidth": configuration.width, "pixelHeight": configuration.height,
             "requestedFramesPerSecond": 30,
+            "liveWindowClockUpdateSeconds": 0.5,
+            "questionCount": questions.count,
             "fullDisplay": true, "excludedWindowCount": 0,
             "audioRecorded": false, "compositedAfterCapture": false,
             "fixtureWindowNumber": window.windowNumber,
@@ -222,34 +281,98 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         try await stream.startCapture()
         streamRunning = true
         try await waitFor("recording-start callback", seconds: 20) { self.recordingStarted }
-        try await pause(5)
-        try await saveScreenshot(filter: filter, configuration: configuration, name: "before-shortcut.png")
-        try await postShortcut()
-        shortcutPostTime = elapsed
-        note("global-shortcut-posted", ["key": "Control+Option+Command+R", "keyCode": 15,
-                                        "transport": "CGEvent.post(cghidEventTap)"])
-        try await waitFor("production hotkey receipt and live result", seconds: 180) {
-            FileManager.default.fileExists(atPath: self.directory.appendingPathComponent("hotkey-received.txt").path)
-                && FileManager.default.fileExists(atPath: self.directory.appendingPathComponent("live-result.json").path)
+        // The stream, fixture window, production app and model all stay alive
+        // through this loop. Only the question's ordinary view content changes.
+        for (index, question) in questions.enumerated() {
+            currentQuestionNumber = index + 1
+            let prefix = String(format: "question-%02d", currentQuestionNumber)
+            for name in ["hotkey-received.txt", "live-start.json", "live-result.json"] {
+                let file = directory.appendingPathComponent(name)
+                if FileManager.default.fileExists(atPath: file.path) {
+                    try FileManager.default.removeItem(at: file)
+                }
+            }
+            view.question = question.question
+            view.choices = question.choices
+            view.questionNumber = currentQuestionNumber
+            view.elapsedSeconds = elapsed
+            view.needsDisplay = true
+            view.displayIfNeeded()
+            let shownAt = elapsed
+            note("question-shown", ["question": question.question])
+            move.post(tap: .cghidEventTap)
+            try await pause(index == 0 ? 5 : 1)
+            let beforeName = probeOnly ? "before-shortcut.png" : "\(prefix)-before-shortcut.png"
+            try await saveScreenshot(filter: filter, configuration: configuration, name: beforeName)
+
+            // Both receipt and answer waits share one 180-second deadline.
+            let deadline = ProcessInfo.processInfo.systemUptime + 180
+            let postedAt = elapsed
+            try await postShortcut()
+            shortcutPostTime = postedAt
+            note("global-shortcut-posted", ["key": "Control+Option+Command+R", "keyCode": 15,
+                                            "transport": "CGEvent.post(cghidEventTap)"])
+            try await waitFor("question \(currentQuestionNumber) real callback and reset", seconds: min(15, deadline - ProcessInfo.processInfo.systemUptime)) {
+                FileManager.default.fileExists(atPath: self.directory.appendingPathComponent("hotkey-received.txt").path)
+                    && FileManager.default.fileExists(atPath: self.directory.appendingPathComponent("live-start.json").path)
+            }
+            let start = try readJSON(named: "live-start.json")
+            try saveJSON(start, as: "\(prefix)-start.json")
+            guard start["ordinal"] as? Int == 0, start["windowVisible"] as? Bool == false else {
+                throw HarnessError(message: "Question \(currentQuestionNumber) failed to reset the menu answer to ordinal 0 with the app window hidden.")
+            }
+            let resetAt = elapsed
+            note("production-reset-observed", ["ordinal": 0, "windowVisible": false])
+            try await pause(0.5)
+            let waitingName = "\(prefix)-waiting.png"
+            let finishedBeforeWaitingScreenshot = FileManager.default.fileExists(atPath: directory.appendingPathComponent("live-result.json").path)
+            try await saveScreenshot(filter: filter, configuration: configuration, name: waitingName)
+            note("waiting-state-captured", ["resultAlreadyAvailable": finishedBeforeWaitingScreenshot])
+            try await waitFor("question \(currentQuestionNumber) live result", seconds: max(0, deadline - ProcessInfo.processInfo.systemUptime)) {
+                FileManager.default.fileExists(atPath: self.directory.appendingPathComponent("live-result.json").path)
+            }
+            let result = try readJSON(named: "live-result.json")
+            self.result = result
+            let observedAt = elapsed
+            resultTime = observedAt
+            try saveJSON(result, as: "\(prefix)-result.json")
+            let receipt = try Data(contentsOf: directory.appendingPathComponent("hotkey-received.txt"))
+            guard !receipt.isEmpty else {
+                throw HarnessError(message: "Question \(currentQuestionNumber) has an empty hotkey receipt.")
+            }
+            try receipt.write(to: directory.appendingPathComponent("\(prefix)-hotkey-received.txt"), options: .atomic)
+            note("production-result-observed", ["ordinal": result["ordinal"] ?? NSNull(),
+                                                 "successful": result["successful"] ?? NSNull()])
+            // Hold every actual result for five real seconds before replacing
+            // the question, including a wrong result that will fail the run.
+            try await pause(probeOnly ? 3 : 5)
+            let afterName = probeOnly ? "after-answer.png" : "\(prefix)-after-answer.png"
+            try await saveScreenshot(filter: filter, configuration: configuration, name: afterName)
+            let valid = result["windowVisible"] as? Bool == false
+                && result["successful"] is Bool
+                && (probeOnly || (result["successful"] as? Bool == true
+                                 && result["ordinal"] as? Int == question.expectedOrdinal))
+            let entry: [String: Any] = [
+                "questionNumber": currentQuestionNumber,
+                "question": question.question, "choices": question.choices,
+                "expectedOrdinal": question.expectedOrdinal, "assertionsPassed": valid,
+                "questionShownAtSeconds": shownAt, "shortcutPostedAtSeconds": postedAt,
+                "resetObservedAtSeconds": resetAt, "resultObservedAtSeconds": observedAt,
+                "resultHeldUntilSeconds": elapsed,
+                "waitingScreenshotResultAlreadyAvailable": finishedBeforeWaitingScreenshot,
+                "beforeScreenshot": beforeName, "waitingScreenshot": waitingName,
+                "afterScreenshot": afterName, "productionStart": start,
+                "productionResult": result]
+            questionResults.append(entry)
+            try saveJSON(["questions": questionResults], as: "question-results.json")
+            guard valid else {
+                let requirement = probeOnly ? "a Boolean successful field" : "successful true and ordinal \(question.expectedOrdinal)"
+                throw HarnessError(message: "Question \(currentQuestionNumber) failed: require windowVisible false and \(requirement). Inspect \(prefix)-result.json and the uninterrupted movie.")
+            }
+            note("question-validated", ["expectedOrdinal": question.expectedOrdinal])
         }
-        let resultData = try Data(contentsOf: directory.appendingPathComponent("live-result.json"))
-        guard let result = try JSONSerialization.jsonObject(with: resultData) as? [String: Any] else {
-            throw HarnessError(message: "Production live-result.json is not a JSON object.")
-        }
-        self.result = result
-        resultTime = elapsed
-        note("production-result-observed")
-        // Keep the actual result visible in the movie even if an assertion fails.
-        try await pause(probeOnly ? 3 : 5)
-        try await saveScreenshot(filter: filter, configuration: configuration, name: "after-answer.png")
+        currentQuestionNumber = 0
         try await stopRecording()
-        guard result["windowVisible"] as? Bool == false,
-              result["successful"] is Bool else {
-            throw HarnessError(message: "The production callback result must contain successful and windowVisible false. Inspect live-result.json.")
-        }
-        guard probeOnly || (result["successful"] as? Bool == true && result["ordinal"] as? Int == 3) else {
-            throw HarnessError(message: "Production result must be successful, ordinal 3, and windowVisible false. Inspect live-result.json and the actual movie.")
-        }
         let file = directory.appendingPathComponent("actual-desktop.mp4")
         let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
         // Validate the finalized container itself, not just a recorder counter.
@@ -260,22 +383,27 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             throw HarnessError(message: "The finalized movie must contain one actual display video track.")
         }
         let videoSize = try await videoTracks[0].load(.naturalSize)
-        guard size > 1_000, duration.isFinite, duration >= (probeOnly ? 7 : 9) else {
-            throw HarnessError(message: "The recording is missing, too short, or empty (\(size) bytes, \(duration) seconds).")
+        let wallSeconds = (recordingStopTime ?? elapsed) - (recordingStartTime ?? elapsed)
+        guard size > 1_000, duration.isFinite, duration >= (probeOnly ? 7 : 20),
+              abs(duration - wallSeconds) <= 2 else {
+            throw HarnessError(message: "The recording is missing, empty, too short, or disagrees with wall time (\(size) bytes, movie \(duration)s, wall \(wallSeconds)s).")
         }
         try saveJSON([
             "successful": true, "continuousActualDesktop": true,
-            "mode": probeOnly ? "permission-and-hotkey-probe" : "live-model-answer",
+            "mode": probeOnly ? "permission-and-hotkey-probe" : "three-live-model-answers",
             "modelAnswerRequired": !probeOnly,
+            "questionCount": questions.count, "questions": questionResults,
             "movie": file.lastPathComponent, "movieBytes": size,
             "recordedSeconds": duration,
+            "recordingWallSeconds": wallSeconds,
             "movieVideoWidth": videoSize.width, "movieVideoHeight": videoSize.height,
             "recordingStartedAtSeconds": recordingStartTime ?? -1,
             "shortcutPostedAtSeconds": shortcutPostTime ?? -1,
             "resultObservedAtSeconds": resultTime ?? -1,
             "productionResult": result, "capture": captureDescription,
             "events": events], as: "harness-result.json")
-        printJSON(["successful": true, "probeOnly": probeOnly, "movie": file.path, "recordedSeconds": duration])
+        printJSON(["successful": true, "probeOnly": probeOnly, "questionCount": questions.count,
+                   "movie": file.path, "recordedSeconds": duration])
     }
 
     private func postShortcut() async throws {
@@ -312,6 +440,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
     private func stopRecording() async throws {
         guard streamRunning, let stream else { return }
         streamRunning = false
+        recordingStopTime = elapsed
+        note("recording-stop-requested")
         try await stream.stopCapture()
         // stopCapture returning does not mean the output file has finalized.
         try await waitFor("recording-finish callback", seconds: 20, checkFailure: false) { self.recordingFinished }
@@ -341,6 +471,7 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         var value = fields
         value["event"] = event
         value["elapsedSeconds"] = elapsed
+        if currentQuestionNumber > 0 { value["questionNumber"] = currentQuestionNumber }
         events.append(value)
         printJSON(value)
         try? saveJSON(["events": events], as: "harness-events.json")
@@ -351,10 +482,20 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         try data.write(to: directory.appendingPathComponent(name), options: .atomic)
     }
 
+    private func readJSON(named name: String) throws -> [String: Any] {
+        let data = try Data(contentsOf: directory.appendingPathComponent(name))
+        guard let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw HarnessError(message: "Production \(name) is not a JSON object.")
+        }
+        return value
+    }
+
     private func failAndExit(_ message: String) {
         watchdog?.cancel()
+        clockTimer?.invalidate()
         try? saveJSON(["successful": false, "error": message, "events": events,
-                       "capture": captureDescription, "productionResult": result], as: "harness-result.json")
+                       "capture": captureDescription, "productionResult": result,
+                       "questions": questionResults], as: "harness-result.json")
         fputs("DESKTOP HARNESS FAILED: \(message)\n", stderr)
         fflush(stderr)
         fixture?.orderOut(nil)

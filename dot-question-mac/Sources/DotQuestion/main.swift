@@ -423,6 +423,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         guard !busy else { NSSound.beep(); return }
         requestOrigin = origin
         resetOutput()
+        if RuntimeConfiguration.isLiveTest {
+            writeLiveEvidence(["ordinal": AnswerIndicator(choice: lastChoice, options: lastOptions)?.ordinal ?? 0,
+                               "windowVisible": window.isVisible, "phase": "capture-started-after-output-reset"],
+                              filename: "live-start.json")
+        }
         if origin == .quick {
             hideForCapture()
             guard origin.allowsAutomaticSend(usingAPI: provider.indexOfSelectedItem == 1) else {
