@@ -27,6 +27,17 @@ final class OllamaMockTests: XCTestCase {
         configuration.protocolClasses = [MockOllamaProtocol.self]
         return OllamaClient(configuration: configuration)
     }
+    func testSchemaRequiresNonemptyAnswerAndExplanation() throws {
+        let schema = OllamaClient.answerSchema(questionPayload: "{\"allowed_choice_labels\":[\"1\",\"2\"],\"sources\":[]}")
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let required = try XCTUnwrap(schema["required"] as? [String])
+        for field in ["answer", "explanation"] {
+            let contract = try XCTUnwrap(properties[field] as? [String: Any])
+            XCTAssertEqual(contract["type"] as? String, "string")
+            XCTAssertEqual(contract["minLength"] as? Int, 1)
+            XCTAssertTrue(required.contains(field))
+        }
+    }
     private func run(tags: String, status: Int = 200, generation: String = "{\"response\":\"synthetic answer\"}") throws -> (Result<String, Error>, [String]) {
         var paths: [String] = []
         MockOllamaProtocol.handler = { request in

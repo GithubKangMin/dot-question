@@ -435,12 +435,25 @@ class UISmokeTests(unittest.TestCase):
 
     def test_false_zero_is_valid_tray_answer(self):
         from core import Answer
-        self.window.answer_done(Answer('false', 'False', 'Reason', None, (), 0, 'true_false'), [])
-        self.assertEqual(self.window.current_order, 0)
-        self.assertEqual(self.window.tray_status.text(), '답 · 0')
-        self.assertIsNone(self.window.last_error)
         from icons import answer_icon
-        self.assertNotEqual(answer_icon(0, 'wifi').pixmap(64).toImage(), answer_icon(None, 'wifi').pixmap(64).toImage())
+        self.window.style.setCurrentText('wifi')
+        self.window.show_answer.setChecked(True)
+        with patch.object(gui, 'answer_icon', wraps=answer_icon) as render:
+            self.window.answer_done(Answer('false', 'False', 'Reason', None, (), 0, 'true_false'), [])
+            render.assert_called_with(0, 'wifi', 'off', 0)
+            self.assertIsNotNone(render.call_args.args[0])
+            self.assertEqual(self.window.current_order, 0)
+            self.assertIsNotNone(self.window.current_order)
+            self.assertEqual(self.window.tray_status.text(), '답 · 0')
+            self.assertIsNone(self.window.last_error)
+            self.window.clear_signal()
+            self.window.render_icon()
+            self.assertIsNone(self.window.current_order)
+            render.assert_called_with(None, 'wifi', 'off', 0)
+        # Geometry survives headless Windows fonts: zero bars versus five bars.
+        # The semantic zero-versus-unknown distinction is verified above at the
+        # actual Window -> renderer boundary, without depending on glyph pixels.
+        self.assertNotEqual(answer_icon(0, 'wifi').pixmap(64).toImage(), answer_icon(5, 'wifi').pixmap(64).toImage())
 
     def test_true_false_character_has_no_blink(self):
         from core import Answer

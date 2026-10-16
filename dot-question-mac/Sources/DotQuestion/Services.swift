@@ -195,7 +195,7 @@ final class OllamaClient {
         return ["type": "object", "additionalProperties": false,
                 "required": ["selected_choice", "answer", "explanation", "citations", "uncertainty"],
                 "properties": ["selected_choice": choice,
-                    "answer": ["type": "string"], "explanation": ["type": "string"],
+                    "answer": ["type": "string", "minLength": 1], "explanation": ["type": "string", "minLength": 1],
                     "citations": citations, "uncertainty": ["type": ["string", "null"], "description": "JSON null when confident. A nonempty string only for a genuine unresolved doubt that prevents confirming the answer. Reasoning belongs in explanation, not here."]]]
     }
     private var generation = 0

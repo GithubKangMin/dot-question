@@ -342,6 +342,31 @@ final class StudyCoreTests: XCTestCase {
         XCTAssertThrowsError(try StructuredAnswerParser.parse(response(choice: "A", uncertainty: "불확실함"), question: question, sources: [chunk()])) { XCTAssertEqual($0 as? StudyError, .missingEvidence) }
         XCTAssertNoThrow(try StructuredAnswerParser.parse(response(uncertainty: "자료에 답을 판단할 근거가 없습니다."), question: question, sources: [chunk()]))
     }
+    func testEmptyAnswerIsRejectedEvenWithValidChoiceAndExplanation() throws {
+        let question = MCQParser.parse("Pick one.\n1. First\n2. Second")
+        for answer in ["", " \n"] {
+            for uncertainty in [NSNull(), "Not enough information"] as [Any] {
+                XCTAssertThrowsError(try StructuredAnswerParser.parse(response(choice: "2", uncertainty: uncertainty, answer: answer, explanation: "The second option follows from the question."), question: question, sources: [])) {
+                    XCTAssertEqual($0 as? StudyError, .missingExplanation)
+                }
+            }
+        }
+    }
+    func testPromptUsesOnlyCurrentTypeRuleAndRequiresNonemptyFields() throws {
+        for type in [QuestionType.multipleChoice, .trueFalse, .shortAnswer, .longAnswer] {
+            let choices = type == .multipleChoice ? [MCQChoice(label: "1", text: "First"), MCQChoice(label: "2", text: "Second")] : []
+            let prompt = try StudyPromptBuilder.build(question: ParsedQuestion(text: "A question", choices: choices, type: type), sources: [])
+            XCTAssertTrue(prompt.system.contains("answer and explanation MUST both be nonempty strings, including when uncertain"))
+            XCTAssertTrue(prompt.system.contains("This is \(type.rawValue)."))
+            for other in [QuestionType.multipleChoice, .trueFalse, .shortAnswer, .longAnswer] where other != type {
+                XCTAssertFalse(prompt.system.contains("This is \(other.rawValue)."))
+            }
+            if type == .multipleChoice {
+                XCTAssertTrue(prompt.system.contains("actual text of that selected choice"))
+                XCTAssertFalse(prompt.system.contains("selected_choice MUST be null"))
+            }
+        }
+    }
     func testMissingExplanationAndMalformedObjectsAreRejected() throws {
         let question = MCQParser.parse("Explain.")
         XCTAssertThrowsError(try StructuredAnswerParser.parse(response(explanation: " \n"), question: question, sources: [])) { XCTAssertEqual($0 as? StudyError, .missingExplanation) }
