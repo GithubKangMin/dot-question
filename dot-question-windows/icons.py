@@ -65,14 +65,14 @@ def _electric_character(painter: QPainter, frame: int) -> None:
 
 
 def answer_icon(order: int | None, style: str, character: str = "off", frame: int = 0, *, error: bool = False) -> QIcon:
-    """Draw a high-DPI tray icon. Orders 1–10 map to numbers or 10–100%.
+    """Draw a high-DPI tray icon. Orders 0–10 map to numbers or 10–100%.
 
     Wi-Fi uses 1–5 bars, with a number fallback for answers 6–10.
     None and invalid orders display ?. Supported styles: number, wifi, battery.
     Characters: off, cat, pikachu. frame animates a tail/blink/electric spark;
     callers own their animation timer and can stop it whenever no work is active.
     """
-    if isinstance(order, bool) or not isinstance(order, int) or not 1 <= order <= 10:
+    if isinstance(order, bool) or not isinstance(order, int) or not 0 <= order <= 10:
         order = None
     style = str(style).lower()
     if style not in ("number", "wifi", "battery"):

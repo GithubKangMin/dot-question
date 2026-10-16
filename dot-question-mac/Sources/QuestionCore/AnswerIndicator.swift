@@ -4,6 +4,8 @@ public struct AnswerIndicator: Equatable {
     public var wifiBars: Int? { ordinal <= 5 ? ordinal : nil }
     public var batteryPercent: Int { ordinal * 10 }
 
+    public init(truth: Bool) { ordinal = truth ? 5 : 0 }
+
     public init?(choice: String?, options: [String]) {
         guard (2...10).contains(options.count), Set(options).count == options.count,
               let choice, let index = options.firstIndex(of: choice) else { return nil }
@@ -24,6 +26,10 @@ public enum WifiAnswerState: Equatable {
             return
         }
         self = .answer(indicator)
+    }
+
+    public init(truth: Bool?) {
+        self = truth.map { .answer(AnswerIndicator(truth: $0)) } ?? .unavailable
     }
 
     public var filledBars: Int {

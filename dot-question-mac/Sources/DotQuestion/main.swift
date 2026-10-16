@@ -46,6 +46,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var apiRow: NSStackView!
     private let question = NSTextView()
     private let answer = NSTextView()
+    private let browserQuestionPicker = NSPopUpButton(frame: .zero, pullsDown: false)
+    private var browserImportButton: NSButton!
+    private var browserQuestions: [ImportedQuestion] = []
+    private var selectedImportedQuestion: ImportedQuestion?
+    private var validatedCopyText: String?
+    private var lastTruth: Bool?
     private let endpoint = NSTextField(string: RuntimeConfiguration.preferences.string(forKey: "endpoint") ?? "http://127.0.0.1:11434")
     private let model = NSTextField(string: RuntimeConfiguration.preferences.string(forKey: "model") ?? "qwen3:4b-instruct")
     private let status = NSTextField(wrappingLabelWithString: "영역을 캡처하거나 질문을 입력하세요. 전송 버튼을 눌러야 AI에 전달됩니다.")
@@ -344,6 +350,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         for checkbox in [menuAnswer] { checkbox.target = self; checkbox.action = #selector(outputModeChanged) }
         settingsPanel.addArrangedSubview(NSTextField(labelWithString: "Enter 준비를 켜면 단축키 후 10초 동안 Return을 캡처용으로 사용합니다. Esc로 해제. 표시는 화면 공유에 보일 수 있습니다."))
         root.addArrangedSubview(NSTextField(labelWithString: "질문 · OCR은 오인식할 수 있어요"))
+        browserImportButton = NSButton(title: "브라우저 문제 JSON 가져오기", target: self, action: #selector(importBrowserQuestions))
+        browserQuestionPicker.target = self; browserQuestionPicker.action = #selector(selectBrowserQuestion)
+        browserQuestionPicker.addItem(withTitle: "가져온 문제 없음")
+        browserQuestionPicker.item(at: 0)?.isEnabled = false
+        let browserRow = NSStackView(views: [browserImportButton, browserQuestionPicker]); browserRow.spacing = 8
+        root.addArrangedSubview(browserRow)
+        root.addArrangedSubview(NSTextField(wrappingLabelWithString: "가져온 문제는 공통 지문과 함께 미리 봅니다. 전송 버튼으로만 풀이합니다. OCR/직접 입력으로 돌아가려면 내용 지우기 또는 캡처를 사용하세요."))
         question.delegate = self
         let qScroll = textScroll(question, editable: true)
         root.addArrangedSubview(qScroll)
@@ -417,7 +430,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         importButton.isEnabled = !value; removeDocumentButton.isEnabled = !value
         documentList.isEnabled = !value; groundedOnly.isEnabled = !value
         cursorMode.isEnabled = !value; captureWidth.isEnabled = !value; captureHeight.isEnabled = !value
-        question.isEditable = !value; armedEnter.isEnabled = !value; quickMode.isEnabled = !value
+        browserImportButton.isEnabled = !value; browserQuestionPicker.isEnabled = !value
+        question.isEditable = !value && selectedImportedQuestion == nil; armedEnter.isEnabled = !value; quickMode.isEnabled = !value
     }
     @objc private func captureRegion() { beginCapture(origin: .manual) }
     private func beginCapture(origin: RequestOrigin) {
@@ -480,6 +494,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                         if self.captureCancelled { self.finish("텍스트 인식 취소됨"); return }
                         switch result {
                         case .success(let text):
+                            self.selectedImportedQuestion = nil
+                            self.browserQuestionPicker.selectItem(at: 0)
                             self.question.string = text
                             self.answer.string = ""; self.resetOutput(wifiState: .pending)
                             if origin == .quick && !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -508,6 +524,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         settingsPanel.isHidden = sender.state != .on
         window.contentView?.layoutSubtreeIfNeeded()
     }
+    @objc private func importBrowserQuestions() {
+        guard !busy else { return }
+        disarmReturn()
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.json]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            // Bound the read itself, even if a file grows after its picker selection.
+            let handle = try FileHandle(forReadingFrom: url)
+            defer { try? handle.close() }
+            let data = try handle.read(upToCount: BrowserQuestionImport.maximumBytes + 1) ?? Data()
+            let imported = try BrowserQuestionImport.parse(data)
+            browserQuestions = imported
+            browserQuestionPicker.removeAllItems()
+            browserQuestionPicker.addItem(withTitle: "문제를 선택하세요")
+            browserQuestionPicker.item(at: 0)?.isEnabled = false
+            for item in imported {
+                browserQuestionPicker.addItem(withTitle: "[\(item.groupID)] \(item.id) · \(item.type.rawValue) · \(item.text.prefix(45))")
+            }
+            // Selecting a question only prepares a preview, never invokes solve.
+            browserQuestionPicker.selectItem(at: 1)
+            selectBrowserQuestion()
+        } catch { validatedCopyText = nil; status.stringValue = error.localizedDescription }
+    }
+    @objc private func selectBrowserQuestion() {
+        guard !busy else { return }
+        let index = browserQuestionPicker.indexOfSelectedItem - 1
+        guard browserQuestions.indices.contains(index) else { return }
+        disarmReturn()
+        selectedImportedQuestion = browserQuestions[index]
+        question.string = browserQuestions[index].displayText
+        question.isEditable = false
+        validatedCopyText = nil; answer.string = ""
+        if !usesPersistentWifi { resetOutput() }
+        status.stringValue = "공통 지문과 문제를 확인한 뒤 전송 버튼을 누르세요. 아직 AI에 전송하지 않았습니다."
+    }
     @objc private func clearAPIKey() { apiKey.stringValue = "" }
     @objc private func sendQuestion() { prepareQuestion(origin: .manual) }
     private func prepareQuestion(origin: RequestOrigin) {
@@ -516,6 +568,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         resetOutput(wifiState: .pending)
         requestOrigin = origin
         let rawQuestion = question.string
+        let imported = selectedImportedQuestion
+        guard imported == nil || origin == .manual else {
+            finish("가져온 문제는 전송 버튼으로 요청하세요."); return
+        }
         let requiresSources = groundedOnly.state == .on
         let useAPI = provider.indexOfSelectedItem == 1
         guard origin != .quick || origin.allowsAutomaticSend(usingAPI: useAPI) else {
@@ -529,7 +585,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             guard let self else { return }
             let prepared = Result<StudyPrompt, Error> {
                 let sources = self.documents.retrieve(query: rawQuestion, limit: useAPI ? 6 : 3, maxCharacters: useAPI ? 7200 : 2400)
-                let prompt = try StudyPromptBuilder.build(question: rawQuestion, sources: sources, requiresSources: requiresSources)
+                let prompt: StudyPrompt
+                if let imported {
+                    prompt = try StudyPromptBuilder.build(question: imported.parsed, sources: sources, requiresSources: requiresSources)
+                } else {
+                    prompt = try StudyPromptBuilder.build(question: rawQuestion, sources: sources, requiresSources: requiresSources)
+                }
                 _ = try LocalEndpoint.question(prompt.user)
                 if !useAPI && prompt.user.utf8.count + prompt.system.utf8.count > 14_000 {
                     throw AppError(message: "로컬 모델의 문맥 한도를 안전하게 유지하려면 질문을 줄여 주세요. 질문과 자료의 UTF-8 합계가 14KB를 초과했습니다.")
@@ -580,12 +641,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                     let result = try StructuredAnswerParser.parse(text, question: prepared.question, sources: prepared.sources)
                     self.answer.string = result.formattedText
                     self.lastChoice = result.confirmedChoice
-                    self.showChoice(self.lastChoice, options: prepared.question.choices.map { $0.label })
+                    self.showChoice(self.lastChoice, options: prepared.question.choices.map { $0.label }, type: prepared.question.type)
+                    self.validatedCopyText = result.automaticCopyText
                     if self.autoCopy.state == .on, let copyText = result.automaticCopyText {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(copyText, forType: .string)
                     }
-                    self.finish(self.lastChoice == nil && (self.requestOrigin == .quick || self.usesPersistentWifi) ? "확정된 선택 답이 없습니다. 질문 창에서 답변과 불확실성 설명을 확인하세요." : "답변 완료. 출처 표시는 원문 대조를 돕는 기능이며 정확성을 보증하지 않습니다.", successful: self.requestOrigin != .quick || self.lastChoice != nil)
+                    self.finish(result.uncertainty != nil ? "확정된 선택 답이 없습니다. 질문 창에서 답변과 불확실성 설명을 확인하세요." : "답변 완료. 출처 표시는 원문 대조를 돕는 기능이며 정확성을 보증하지 않습니다.", successful: result.uncertainty == nil)
                 } catch {
                     self.answer.string = "[형식/선택지/출처 검증 실패: 자동 복사와 번호 표시는 하지 않습니다.]\n\(error.localizedDescription)\n\n모델 원문 (미검증):\n\(text)"
                     self.resetOutput(); self.finish("응답 검증 실패. 원문을 검토하거나 다시 질문하세요.")
@@ -621,6 +683,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             if !successful {
                 wifiAnswerState = .unavailable
                 menuMessage = message
+            } else if let truth = lastTruth {
+                menuStatus.title = "참/거짓: \(truth ? "참 · 5칸" : "거짓 · 0칸") · 다음 명령까지 유지"
             } else if let indicator = AnswerIndicator(choice: lastChoice, options: lastOptions), let choice = lastChoice {
                 menuStatus.title = "선택 답 \(choice) · 보기 순서 \(indicator.ordinal)" + (indicator.wifiBars == nil ? " · 5칸 범위 밖: 상세 답을 확인하세요." : " · 다음 명령까지 유지")
             }
@@ -666,8 +730,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         if apiConfirmationOpen { NSApp.abortModal() }
         setBusy(false); status.stringValue = "취소했습니다. 늦게 도착한 답변은 표시하지 않습니다."; if requestOrigin.shouldRevealWindow && !closingWindow { showWindow() }
     }
-    @objc private func copyAnswer() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(answer.string, forType: .string) }
-    @objc private func clearContent() { cancelWork(); question.string = ""; answer.string = ""; resetOutput(); status.stringValue = "내용을 지웠습니다." }
+    @objc private func copyAnswer() {
+        guard let text = validatedCopyText else { status.stringValue = "복사할 확정 답변이 없습니다. 기존 클립보드는 유지합니다."; return }
+        NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+    }
+    @objc private func clearContent() { cancelWork(); selectedImportedQuestion = nil; browserQuestionPicker.selectItem(at: 0); question.isEditable = true; question.string = ""; answer.string = ""; resetOutput(); status.stringValue = "내용을 지웠습니다." }
     private func shortcutTriggered() {
         if let directory = RuntimeConfiguration.liveDirectory {
             try? "Real Carbon hotkey callback received\n".write(to: directory.appendingPathComponent("hotkey-received.txt"), atomically: true, encoding: .utf8)
@@ -769,7 +836,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         catch { status.stringValue = error.localizedDescription }
     }
     private func resetOutput(wifiState: WifiAnswerState = .idle) {
-        stopCharacterAnimation(); lastChoice = nil; lastOptions = []; menuMessage = nil
+        stopCharacterAnimation(); lastChoice = nil; lastTruth = nil; validatedCopyText = nil; lastOptions = []; menuMessage = nil
         wifiAnswerState = wifiState
         menuStatus.title = wifiState == .pending ? "처리 중 · 아직 확정된 답 없음" : "대기 중 · 아직 답 없음"
         renderMenuAnswer()
@@ -796,6 +863,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         button.toolTip = "dot question • answer unknown • not actual battery/network · 실제 배터리/네트워크 상태 아님"
         if let message = menuMessage {
             button.title = "Q!"; button.toolTip = message; return
+        }
+        if let truth = lastTruth {
+            button.title = menuAnswer.state == .on ? (truth ? "Q 참" : "Q 거짓") : "Q"
+            button.toolTip = "dot question • 참/거짓 결과 • Wi-Fi형: 거짓 0칸 / 참 5칸 • 실제 네트워크 상태 아님"
+            return
         }
         guard let indicator = AnswerIndicator(choice: lastChoice, options: lastOptions),
               let choice = lastChoice else { return }
@@ -827,6 +899,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
     func textDidChange(_ notification: Notification) {
         guard let view = notification.object as? NSTextView, view === question else { return }
+        validatedCopyText = nil
         // Draft edits are not a new capture/send command.
         guard !usesPersistentWifi else { return }
         resetOutput()
@@ -840,12 +913,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         if armedReturnKey != nil { disarmReturn() }
         renderMenuAnswer()
     }
-    private func showChoice(_ choice: String?, options: [String]) {
+    private func showChoice(_ choice: String?, options: [String], type: QuestionType = .multipleChoice) {
         stopCharacterAnimation()
         lastChoice = choice; lastOptions = options
-        wifiAnswerState = WifiAnswerState(choice: choice, options: options)
+        lastTruth = type == .trueFalse ? choice.flatMap { $0 == "true" ? true : ($0 == "false" ? false : nil) } : nil
+        wifiAnswerState = type == .trueFalse ? WifiAnswerState(truth: lastTruth) : WifiAnswerState(choice: choice, options: options)
         renderMenuAnswer()
-        guard !usesPersistentWifi, selectedCharacter != .off,
+        guard !usesPersistentWifi, selectedCharacter != .off, type != .trueFalse,
               let indicator = AnswerIndicator(choice: choice, options: options) else { return }
         guard !motionReduced else { return }
         animationCount = indicator.ordinal; animationStep = 0

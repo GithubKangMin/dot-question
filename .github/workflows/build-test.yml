@@ -6,6 +6,7 @@ name: Build and test dot question
     paths:
       - 'dot-question-mac/**'
       - 'dot-question-windows/**'
+      - 'browser-extension/**'
       - 'ci/**'
       - '.github/workflows/build-test.yml'
   workflow_dispatch:
@@ -100,6 +101,21 @@ jobs:
           architecture: x64
       - name: Install build and test requirements
         run: python -m pip install --no-cache-dir -r requirements-build.txt
+      - name: Test visible DOM extraction in Chromium with synthetic fixtures
+        run: |
+          python -m pip install --no-cache-dir playwright==1.62.0
+          python -m playwright install chromium
+          python -m unittest discover -s ../browser-extension/tests -v
+      - name: Package least-privilege browser extension
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path ../browser-extension/manifest.json,../browser-extension/extractor.js,../browser-extension/popup.html,../browser-extension/popup.js,../browser-extension/popup.css -DestinationPath dist/dot-question-chromium-extension.zip
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dot-question-chromium-extension
+          path: dot-question-windows/dist/dot-question-chromium-extension.zip
+          if-no-files-found: error
+          retention-days: 1
       - name: Run all synthetic and offscreen tests
         run: python ../ci/test-windows.py
       - name: Capture actual Qt widgets with synthetic fixtures

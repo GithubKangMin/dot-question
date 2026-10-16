@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
     QHBoxLayout, QFormLayout, QLabel, QLineEdit, QPushButton, QPlainTextEdit,
     QComboBox, QCheckBox, QSpinBox, QFileDialog, QMessageBox, QListWidget,
     QSystemTrayIcon, QMenu, QDialog, QDialogButtonBox, QSplitter, QScrollArea)
-from core import DocumentStore, retrieve, parse_options, build_messages, OllamaClient, OpenAIClient
+from core import read_question_import, DocumentStore, retrieve, parse_options, build_messages, OllamaClient, OpenAIClient
 from win_capture import Hotkeys, CaptureOverlay, capture_cursor, ocr_image
 from icons import answer_icon
 
@@ -29,6 +29,8 @@ class Window(QMainWindow):
         self.cancelled = False
         self.serial = 0
         self.current_order = None
+        self.copy_text = None
+        self.imported_question = None
         self.frame = 0
         self.remaining_frames = 0
         self.overlay = None
@@ -77,6 +79,14 @@ class Window(QMainWindow):
         apply = QPushButton('단축키 적용'); apply.clicked.connect(self.apply_hotkey); shortcuts.addWidget(apply)
         layout.addLayout(shortcuts)
         layout.addWidget(QLabel('준비 중 Enter는 다른 앱에 입력되지 않을 수 있습니다. Esc로 해제합니다.'))
+        import_row = QHBoxLayout()
+        self.import_questions_button = QPushButton('브라우저 문제 JSON 가져오기')
+        self.import_questions_button.clicked.connect(self.import_questions)
+        self.question_picker = QComboBox(); self.question_picker.addItem('직접 입력 / OCR', None)
+        self.question_picker.currentIndexChanged.connect(self.select_question)
+        import_row.addWidget(self.import_questions_button); import_row.addWidget(self.question_picker, 1)
+        layout.addLayout(import_row)
+        layout.addWidget(QLabel('가져온 문제는 공통 지문과 함께 검토한 뒤 전송하세요. 자동으로 풀지 않습니다.'))
         self.question = QPlainTextEdit(); self.question.setPlaceholderText('문제를 붙여넣거나 캡처하세요. 보기마다 줄바꿈하세요.')
         self.question.setMinimumHeight(130); self.question.textChanged.connect(self.clear_signal)
         self.answer = QPlainTextEdit(); self.answer.setReadOnly(True); self.answer.setMinimumHeight(130)
@@ -104,7 +114,7 @@ class Window(QMainWindow):
         actions = QHBoxLayout()
         self.send = QPushButton('로컬 AI로 전송'); self.send.clicked.connect(self.submit)
         cancel = QPushButton('취소'); cancel.clicked.connect(self.cancel)
-        copy = QPushButton('답변 복사'); copy.clicked.connect(lambda: QApplication.clipboard().setText(self.answer.toPlainText()))
+        copy = QPushButton('답변 복사'); copy.clicked.connect(self.copy_answer)
         clear = QPushButton('내용 지우기'); clear.clicked.connect(self.clear)
         for w in [self.send, cancel, copy, clear]: actions.addWidget(w)
         layout.addLayout(actions)
@@ -189,7 +199,8 @@ class Window(QMainWindow):
     def set_busy(self, busy):
         self.busy = busy
         for widget in (self.question, self.send, self.mode, self.grounded,
-                       self.endpoint, self.local_model, self.api_model, self.key):
+                       self.endpoint, self.local_model, self.api_model, self.key,
+                       self.import_questions_button, self.question_picker):
             widget.setEnabled(not busy)
         if not busy:
             api = self.mode.currentIndex() == 1
@@ -232,6 +243,7 @@ class Window(QMainWindow):
     def clear(self):
         if self.busy or self.capture_pending or self.overlay:
             self.cancel()
+        self.question_picker.setCurrentIndex(0)
         self.question.clear(); self.answer.clear(); self.clear_signal()
 
     def capture(self, checked=False, *, from_hotkey=False):
@@ -271,12 +283,41 @@ class Window(QMainWindow):
         self.run(lambda: ocr_image(image), self.ocr_done)
 
     def ocr_done(self, text):
+        self.question_picker.setCurrentIndex(0)
         self.question.setPlainText(text)
         if self.quick_active:
             if not text.strip(): self.error('텍스트를 찾지 못했습니다. 캡처 범위를 확인하세요.'); return
             self.submit(automatic=True)
         else:
             self.status.setText('OCR 완료. 질문을 검토하고 전송하세요.' if text.strip() else '텍스트를 찾지 못했습니다. 직접 붙여넣을 수 있습니다.')
+
+    def import_questions(self):
+        if self.busy or self.capture_pending or self.overlay: return
+        file, _ = QFileDialog.getOpenFileName(self, '브라우저 문제 가져오기', '', '문제 JSON (*.json)')
+        if not file: return
+        try:
+            questions = read_question_import(file)
+            self.question_picker.blockSignals(True)
+            self.question_picker.clear(); self.question_picker.addItem('직접 입력 / OCR', None)
+            for question in questions:
+                self.question_picker.addItem(f'{question.group_id} / {question.id} · {question.type} · {question.text[:55]}', question)
+            self.question_picker.blockSignals(False)
+            self.question_picker.setCurrentIndex(1)
+            self.status.setText(f'{len(questions)}문제 가져옴. 공통 지문과 선택 문제를 검토하고 직접 전송하세요.')
+        except Exception as error:
+            self.error(error)
+
+    def select_question(self, index):
+        self.imported_question = self.question_picker.itemData(index)
+        self.question.setReadOnly(self.imported_question is not None)
+        self.question.setPlainText(self.imported_question.display_text if self.imported_question else '')
+        self.clear_signal()
+
+    def copy_answer(self):
+        if self.copy_text is not None:
+            QApplication.clipboard().setText(self.copy_text)
+        else:
+            self.status.setText('복사할 검증 답변이 없습니다. 기존 클립보드는 유지됩니다.')
 
     def refresh_docs(self):
         self.documents.clear()
@@ -300,13 +341,13 @@ class Window(QMainWindow):
         try: self.store.remove(item.data(Qt.ItemDataRole.UserRole)); self.refresh_docs()
         except Exception as error: self.error(error)
 
-    def consent(self, question, sources):
+    def consent(self, question, sources, imported=None):
         dialog = QDialog(self); dialog.setWindowTitle('OpenAI 전송 · 매 요청 확인'); dialog.resize(760, 630)
         layout = QVBoxLayout(dialog)
         label = QLabel('목적지: https://api.openai.com/v1/chat/completions\n질문과 아래 자료 발췌를 OpenAI에 전송합니다. 캡처 이미지는 보내지 않습니다.\nChatGPT 구독과 별도 과금이며 금액 한도를 보증하지 않습니다. 취소는 환불이 아닙니다.\nAPI 키는 인증에 사용하며 파일로 저장하지 않습니다. store:false도 모든 로그 삭제를 보증하지 않습니다.')
         label.setWordWrap(True); layout.addWidget(label)
         preview = QPlainTextEdit(); preview.setReadOnly(True)
-        preview.setPlainText(json.dumps({'model': self.api_model.text().strip(), 'messages': build_messages(question, sources, requires_sources=self.grounded.isChecked()), 'stream': False, 'store': False, 'max_completion_tokens': 2048, 'response_format': {'type':'json_object'}}, ensure_ascii=False, indent=2))
+        preview.setPlainText(json.dumps({'model': self.api_model.text().strip(), 'messages': build_messages(question, sources, requires_sources=self.grounded.isChecked(), imported=imported), 'stream': False, 'store': False, 'max_completion_tokens': 2048, 'response_format': {'type':'json_object'}}, ensure_ascii=False, indent=2))
         layout.addWidget(preview)
         links = QLabel('<a href="https://platform.openai.com/docs/guides/your-data">OpenAI 데이터 정책</a> · <a href="https://openai.com/api/pricing/">요금</a>')
         links.setOpenExternalLinks(True); layout.addWidget(links)
@@ -323,18 +364,21 @@ class Window(QMainWindow):
         self.hk.disarm(); self.clear_signal()
         question = self.question.toPlainText().strip()
         if not question: self.error('질문을 입력하세요.'); return
+        imported = self.imported_question
+        if automatic and imported is not None:
+            self.error('가져온 문제는 직접 전송 버튼으로 보내세요.'); return
         api = self.mode.currentIndex() == 1
         required = self.grounded.isChecked()
         documents = self.store.documents
         def prepare():
             sources = retrieve(question, documents, limit=6 if api else 3,
                                max_characters=7200 if api else 2400) if required else []
-            build_messages(question, sources, requires_sources=required)
+            build_messages(question, sources, requires_sources=required, imported=imported)
             return sources
         self.status.setText('질문/자료 검색 중…')
-        self.run(prepare, lambda sources: self.start_request(question, sources, api, required, automatic))
+        self.run(prepare, lambda sources: self.start_request(question, sources, api, required, automatic, imported))
 
-    def start_request(self, question, sources, api, required, automatic=False):
+    def start_request(self, question, sources, api, required, automatic=False, imported=None):
         try:
             if automatic and (api or self.mode.currentIndex() != 0):
                 raise ValueError('빠른 모드는 로컬 Ollama 전용입니다. API는 전송하지 않았습니다.')
@@ -345,7 +389,7 @@ class Window(QMainWindow):
                 # cancellation again before creating any network operation.
                 self.set_busy(True)
                 try:
-                    approved = self.consent(question, sources)
+                    approved = self.consent(question, sources, **({"imported": imported} if imported else {}))
                 finally:
                     self.set_busy(False)
                 if not approved or self.cancelled or self.closing:
@@ -353,11 +397,11 @@ class Window(QMainWindow):
                     self.status.setText('전송하지 않았습니다.'); return
                 client = OpenAIClient(model=self.api_model.text().strip())
                 session_key = self.key.text().strip()
-                fn = lambda: client.answer(session_key, question, sources, requires_sources=required)
+                fn = lambda: client.answer(session_key, question, sources, requires_sources=required, **({"imported": imported} if imported else {}))
             else:
                 client = OllamaClient(self.endpoint.text().strip())
                 model = self.local_model.text().strip()
-                fn = lambda: client.answer(model, question, sources, requires_sources=required)
+                fn = lambda: client.answer(model, question, sources, requires_sources=required, **({"imported": imported} if imported else {}))
             self.status.setText('응답 대기 중…'); self.answer.clear()
             self.run(fn, lambda result: self.answer_done(result, sources))
         except Exception as error: self.error(error)
@@ -372,22 +416,24 @@ class Window(QMainWindow):
             lines.append(f'[{source.id}] {source.citation_label}\n{source.text}')
         text = '\n\n'.join(lines); self.answer.setPlainText(text)
         self.status.setText('응답 형식/보기/출처 ID 검증 완료. 사실성은 직접 확인하세요.')
-        if self.autocopy.isChecked() and not result.uncertainty:
-            QApplication.clipboard().setText(text)
+        self.copy_text = None if result.uncertainty else result.answer if result.question_type in {"short_answer", "long_answer"} else text
+        if self.autocopy.isChecked() and self.copy_text is not None:
+            QApplication.clipboard().setText(self.copy_text)
         self.current_order = result.choice_index if not result.uncertainty else None
-        if self.quick_active and not self.current_order:
+        if self.quick_active and self.current_order is None:
             self.error('확실한 선택 번호를 얻지 못했습니다. 창을 열어 답변을 검토하세요.', preserve_answer=True)
             return
         self.quick_active = False
-        self.tray_status.setText('답 · ' + str(self.current_order) if self.current_order else '답변 검토 필요')
-        self.tray.setToolTip('dot question · 답: ' + str(self.current_order) if self.current_order else 'dot question · 답변 검토 필요')
+        self.tray_status.setText('답 · ' + str(self.current_order) if self.current_order is not None else '답변 검토 필요')
+        self.tray.setToolTip('dot question · 답: ' + str(self.current_order) if self.current_order is not None else 'dot question · 답변 검토 필요')
         self.output_changed()
-        if self.current_order and self.character.currentText() != 'off' and not self.reduce_motion.isChecked():
+        if result.question_type != 'true_false' and self.current_order and self.character.currentText() != 'off' and not self.reduce_motion.isChecked():
             self.remaining_frames = self.current_order * 2; self.render_icon(); self.animation.start()
 
     def clear_signal(self):
         if not hasattr(self, 'tray'): return
         self.answer.clear()
+        self.copy_text = None
         self.last_error = None
         self.tray_status.setText('준비 · Q?')
         self.tray.setToolTip('dot question · 앱 답 표시 (실제 Wi-Fi/배터리 상태 아님)')

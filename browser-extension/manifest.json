@@ -1,0 +1,9 @@
+{
+  "manifest_version": 3,
+  "name": "dot question · visible question import",
+  "version": "0.2.0",
+  "description": "Review visible questions and export a local file for explicit desktop import.",
+  "permissions": ["activeTab", "scripting"],
+  "action": {"default_popup": "popup.html", "default_title": "문제 가져오기"},
+  "content_security_policy": {"extension_pages": "script-src 'self'; object-src 'none'; connect-src 'none'"}
+}

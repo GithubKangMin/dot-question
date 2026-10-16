@@ -1,0 +1,11 @@
+<!doctype html><html lang="ko"><meta charset="utf-8"><title>dot question</title>
+<link rel="stylesheet" href="popup.css">
+<body><h1>웹 문제 가져오기</h1>
+<p>현재 탭에서 렌더링된 문제만 읽습니다. 버튼을 누르기 전에는 읽지 않습니다. 사이트에 답을 입력하거나 제출하지 않습니다.</p>
+<button id="capture">현재 탭 문제 읽기</button>
+<p id="status" role="status">아직 읽지 않았습니다.</p>
+<pre id="preview"></pre>
+<p>공통 지문·표·보기 연결을 확인하세요. 숨겨진 내용, 이미지·수식 그림, iframe은 지원하지 않습니다. 일반 사이트의 구조가 다르면 OCR을 사용하세요.</p>
+<button id="download" disabled>검토한 문제 JSON 저장</button>
+<p>저장한 파일을 Mac/Windows 앱의 ‘웹 문제 JSON 가져오기’에서 열고, 문제를 선택한 뒤 직접 전송하세요. 파일에는 문제 내용이 포함됩니다.</p>
+<script type="module" src="popup.js"></script></body></html>

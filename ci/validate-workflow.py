@@ -19,7 +19,7 @@ class WorkflowChecks(unittest.TestCase):
         self.assertEqual(set(self.data['on']), {'push', 'workflow_dispatch'})
         push = self.data['on']['push']
         self.assertEqual(push['branches'], ['main'])
-        self.assertEqual(push['paths'], ['dot-question-mac/**', 'dot-question-windows/**', 'ci/**', '.github/workflows/build-test.yml'])
+        self.assertEqual(push['paths'], ['dot-question-mac/**', 'dot-question-windows/**', 'browser-extension/**', 'ci/**', '.github/workflows/build-test.yml'])
         inputs = self.data['on']['workflow_dispatch']['inputs']['platform']
         self.assertEqual(inputs['default'], 'macos')
         self.assertEqual(inputs['options'], ['macos', 'windows', 'both'])

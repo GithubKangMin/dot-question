@@ -398,5 +398,61 @@ class UISmokeTests(unittest.TestCase):
         self.assertEqual(self.app.clipboard().text(), 'keep clipboard')
 
 
+
+    def test_import_picker_preserves_context_without_auto_send(self):
+        import json
+        from pathlib import Path
+        from test_question_import import fixture
+        data = fixture('short_answer')
+        data['groups'][0]['questions'].append(dict(id='q2', type='long_answer', text='Another?', choices=[]))
+        file = Path(self.tmp.name) / 'questions.json'; file.write_text(json.dumps(data))
+        self.window.quick_mode.setChecked(True)
+        with patch.object(gui.QFileDialog, 'getOpenFileName', return_value=(str(file), '')), patch.object(self.window, 'submit') as send:
+            self.window.import_questions()
+            send.assert_not_called()
+        self.assertTrue(self.window.question.isReadOnly())
+        self.assertIn('Shared passage', self.window.question.toPlainText())
+        self.window.question_picker.setCurrentIndex(2)
+        self.assertIn('Shared passage', self.window.question.toPlainText())
+        self.assertIn('Another?', self.window.question.toPlainText())
+        self.window.ocr_done('OCR fallback')
+        self.assertIsNone(self.window.imported_question)
+        self.assertFalse(self.window.question.isReadOnly())
+
+    def test_subjective_answer_only_copy_and_uncertainty_preservation(self):
+        from core import Answer
+        self.window.autocopy.setChecked(True)
+        result = Answer(None, 'Only answer', 'Separate reasoning', None, (), None, 'long_answer')
+        self.window.answer_done(result, [])
+        self.assertEqual(self.app.clipboard().text(), 'Only answer')
+        self.assertIn('Separate reasoning', self.window.answer.toPlainText())
+        self.app.clipboard().setText('keep')
+        result = Answer(None, 'Guess', 'Reason', 'Unsure', (), None, 'short_answer')
+        self.window.answer_done(result, []); self.window.copy_answer()
+        self.assertEqual(self.app.clipboard().text(), 'keep')
+        self.window.clear_signal(); self.window.copy_answer()
+        self.assertEqual(self.app.clipboard().text(), 'keep')
+
+    def test_false_zero_is_valid_tray_answer(self):
+        from core import Answer
+        self.window.answer_done(Answer('false', 'False', 'Reason', None, (), 0, 'true_false'), [])
+        self.assertEqual(self.window.current_order, 0)
+        self.assertEqual(self.window.tray_status.text(), '답 · 0')
+        self.assertIsNone(self.window.last_error)
+        from icons import answer_icon
+        self.assertNotEqual(answer_icon(0, 'wifi').pixmap(64).toImage(), answer_icon(None, 'wifi').pixmap(64).toImage())
+
+    def test_true_false_character_has_no_blink(self):
+        from core import Answer
+        self.window.character.setCurrentText('cat')
+        self.window.style.setCurrentText('wifi')
+        self.window.reduce_motion.setChecked(False)
+        for choice, signal in [('true', 5), ('false', 0)]:
+            self.window.answer_done(Answer(choice, choice, 'Reason', None, (), signal, 'true_false'), [])
+            self.assertEqual(self.window.current_order, signal)
+            self.assertFalse(self.window.animation.isActive())
+            self.assertEqual(self.window.remaining_frames, 0)
+            self.assertIsNone(self.window.last_error)
+
 if __name__ == '__main__':
     unittest.main()

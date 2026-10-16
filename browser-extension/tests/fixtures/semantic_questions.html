@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8">
+<section data-question-group>
+  <article data-shared-context id="passage">Read the shared passage.<table><tr><th>Day</th><th>Count</th></tr><tr><td>Monday</td><td>12</td></tr></table></article>
+  <fieldset><legend>Choose the first day.</legend><label><input type="radio" name="day" value="SECRET_VALUE" checked>Monday</label><label><input type="radio" name="day">Tuesday</label><p hidden>SECRET_HIDDEN</p></fieldset>
+  <div data-question><p data-question-text>Monday comes before Tuesday.</p><div role="radio">True</div><div role="radio">False</div></div>
+  <div data-question><p data-question-text>What is the count?</p><input type="text" value="SECRET_SHORT"></div>
+  <fieldset><legend>Explain the data.</legend><textarea>SECRET_LONG</textarea></fieldset>
+</section>
+<div data-question data-question-type="short_answer" aria-describedby="extra"><p data-question-text>Independent question.</p></div><p id="extra">Explicitly associated context.</p>
+<div hidden data-question data-question-type="short_answer">SECRET_ROOT</div>
