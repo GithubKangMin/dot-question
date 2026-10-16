@@ -144,6 +144,9 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             throw HarnessError(message: "The production app is not ready: global hotkey registration, screen permission, or hidden-window assertion failed. Inspect app-ready.json. No permission change was attempted.")
         }
 
+        // App-scoped presentation hides the Dock only while this fixture is
+        // active. Menu bar remains visible; no system preference is changed.
+        NSApp.presentationOptions = [.hideDock]
         let displayID = CGMainDisplayID()
         guard let screen = NSScreen.screens.first(where: {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
@@ -249,7 +252,14 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         }
         let file = directory.appendingPathComponent("actual-desktop.mp4")
         let size = (try FileManager.default.attributesOfItem(atPath: file.path)[.size] as? NSNumber)?.int64Value ?? 0
-        let duration = CMTimeGetSeconds(recording.recordedDuration)
+        // Validate the finalized container itself, not just a recorder counter.
+        let asset = AVURLAsset(url: file)
+        let duration = CMTimeGetSeconds(try await asset.load(.duration))
+        let videoTracks = try await asset.loadTracks(withMediaType: .video)
+        guard videoTracks.count == 1 else {
+            throw HarnessError(message: "The finalized movie must contain one actual display video track.")
+        }
+        let videoSize = try await videoTracks[0].load(.naturalSize)
         guard size > 1_000, duration.isFinite, duration >= (probeOnly ? 7 : 9) else {
             throw HarnessError(message: "The recording is missing, too short, or empty (\(size) bytes, \(duration) seconds).")
         }
@@ -259,6 +269,7 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             "modelAnswerRequired": !probeOnly,
             "movie": file.lastPathComponent, "movieBytes": size,
             "recordedSeconds": duration,
+            "movieVideoWidth": videoSize.width, "movieVideoHeight": videoSize.height,
             "recordingStartedAtSeconds": recordingStartTime ?? -1,
             "shortcutPostedAtSeconds": shortcutPostTime ?? -1,
             "resultObservedAtSeconds": resultTime ?? -1,

@@ -23,6 +23,7 @@ run_capture() {
 import json,sys
 p=json.load(open(sys.argv[1]))
 assert p['hotkeyStatus']==0, p
+assert p['model']=='qwen2.5:1.5b', p
 assert p['screenCaptureAllowed'] is True, 'BLOCKED: app screen capture permission absent; no settings changed'
 assert p['windowVisible'] is False, p
 PY
@@ -31,6 +32,12 @@ PY
 }
 # Verify real recording and global shortcut delivery BEFORE downloading a model.
 run_capture --probe "$OUT/probe"
+python3 - "$OUT/probe/live-result.json" <<'PY_CHECK'
+import json,sys
+p=json.load(open(sys.argv[1]))
+for text in ['Red Planet', 'Venus', 'Jupiter', 'Mars', 'Saturn', 'Neptune']:
+    assert text.lower() in p['questionOCR'].lower(), p
+PY_CHECK
 # Official vendor distribution only; CLI runs in job directory, no installer/GUI.
 TOOLS="$RUNNER_TEMP/dot-question-ollama"
 mkdir -p "$TOOLS"

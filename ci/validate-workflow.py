@@ -56,6 +56,8 @@ class WorkflowChecks(unittest.TestCase):
         runtime = (ROOT / 'dot-question-mac/Sources/DotQuestion/RuntimeConfiguration.swift').read_text()
         self.assertIn('environment["GITHUB_ACTIONS"] == "true"', runtime)
         self.assertIn('isSmokeTest || isLiveTest', runtime)
+        ui = (ROOT / 'dot-question-mac/Sources/DotQuestion/main.swift').read_text()
+        self.assertIn('model.stringValue = "qwen2.5:1.5b"', ui)
 
     def test_lipo_input_precedes_verify_arch_list(self):
         steps = self.data['jobs']['macos']['steps']

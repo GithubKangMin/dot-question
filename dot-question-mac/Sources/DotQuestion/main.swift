@@ -101,6 +101,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             RuntimeConfiguration.preferences.set(true, forKey: "quickMode")
             RuntimeConfiguration.preferences.set(1, forKey: "menuStyle")
             RuntimeConfiguration.preferences.set("qwen2.5:1.5b", forKey: "model")
+            model.stringValue = "qwen2.5:1.5b"
         }
         buildWindow()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -124,7 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         if code != 0 { status.stringValue = "단축키 등록 실패 (\(code)). 메뉴의 영역 캡처를 이용하세요." }
         if RuntimeConfiguration.isLiveTest {
             let ready: [String: Any] = ["hotkeyStatus": code, "screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
-                                        "windowVisible": window.isVisible]
+                                        "windowVisible": window.isVisible, "model": model.stringValue]
             writeLiveEvidence(ready, filename: "app-ready.json")
         }
         if let error = documents.loadError { documentStatus.stringValue = error }
