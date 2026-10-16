@@ -30,7 +30,7 @@ private struct QuestionFixture {
         expectedOrdinal: 3)
     static let sequence = [
         QuestionFixture(question: "Which number equals 2 + 2?",
-                        choices: ["1. 3", "2. 4", "3. 5", "4. 6", "5. 7"],
+                        choices: ["1. Three", "2. Four", "3. Five", "4. Six", "5. Seven"],
                         expectedOrdinal: 2),
         redPlanet,
         QuestionFixture(question: "Which animal is a mammal?",

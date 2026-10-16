@@ -136,7 +136,7 @@ final class StudyCoreTests: XCTestCase {
 
     func testLiveRecordingQuestionsPreserveAllFiveLabels() throws {
         let questions = [
-            "Which number equals 2 + 2?\n1. 3\n2. 4\n3. 5\n4. 6\n5. 7",
+            "Which number equals 2 + 2?\n1. Three\n2. Four\n3. Five\n4. Six\n5. Seven",
             "Which planet is known as Red Planet?\n1. Venus\n2. Jupiter\n3. Mars\n4. Saturn\n5. Neptune",
             "Which animal is a mammal?\n1. Trout\n2. Frog\n3. Lizard\n4. Eagle\n5. Dolphin"
         ]
