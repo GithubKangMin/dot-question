@@ -48,7 +48,7 @@ jobs:
       - name: Package ad-hoc-signed arm64 application
         run: |
           test "$(uname -m)" = arm64
-          lipo -verify_arch arm64 'dist/dot question.app/Contents/MacOS/DotQuestion'
+          lipo 'dist/dot question.app/Contents/MacOS/DotQuestion' -verify_arch arm64
           ditto -c -k --sequesterRsrc --keepParent 'dist/dot question.app' dist/dot-question-macos-arm64.zip
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:

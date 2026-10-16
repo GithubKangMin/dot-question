@@ -46,6 +46,11 @@ class WorkflowChecks(unittest.TestCase):
                 if step['uses'].startswith('actions/checkout@'):
                     self.assertIs(step['with']['persist-credentials'], False)
 
+    def test_lipo_input_precedes_verify_arch_list(self):
+        steps = self.data['jobs']['macos']['steps']
+        package = next(step['run'] for step in steps if step.get('name', '').startswith('Package'))
+        self.assertIn("lipo 'dist/dot question.app/Contents/MacOS/DotQuestion' -verify_arch arm64", package)
+
     def test_no_secrets_or_global_xcode_switch(self):
         text = WORKFLOW.read_text()
         self.assertNotIn('secrets.', text)

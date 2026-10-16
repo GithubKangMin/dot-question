@@ -89,10 +89,10 @@ class DocumentTests(OfflineTest):
         imported = store.import_file(path)
         self.assertEqual(path.read_bytes(), original)
         self.assertEqual(core.DocumentStore(self.path).documents, [imported])
-        archive = json.loads(self.path.read_text())
+        archive = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(set(archive), {"version", "documents"})
-        self.assertNotIn(str(self.root), self.path.read_text())
-        self.assertNotIn("api_key", self.path.read_text())
+        self.assertNotIn(str(self.root), self.path.read_text(encoding="utf-8"))
+        self.assertNotIn("api_key", self.path.read_text(encoding="utf-8"))
 
     def test_remove_only_library_copy(self):
         path = self.make_file()
