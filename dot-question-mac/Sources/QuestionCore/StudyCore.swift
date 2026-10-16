@@ -150,6 +150,108 @@ public struct ParsedQuestion: Equatable {
     public init(text: String, choices: [MCQChoice]) { self.text = text; self.choices = choices }
 }
 
+/// Geometry from a separate, character-precise OCR pass. Coordinates are normalized
+/// image coordinates, with y increasing upwards. Never infer these from string length.
+public struct OCRGlyph {
+    public let character: Character
+    public let bounds: CGRect
+    public init(character: Character, bounds: CGRect) { self.character = character; self.bounds = bounds }
+}
+
+public struct OCRLine {
+    public let text: String
+    public let bounds: CGRect
+    public let verificationGlyphs: [OCRGlyph]
+    public init(text: String, bounds: CGRect, verificationGlyphs: [OCRGlyph] = []) {
+        self.text = text; self.bounds = bounds; self.verificationGlyphs = verificationGlyphs
+    }
+}
+
+public enum OCRNumericChoiceNormalizer {
+    private struct NumericLine {
+        let ordinal: Int
+        let label: String
+        let value: String
+        let hasSpace: Bool
+    }
+    private static func numericLine(_ text: String) -> NumericLine? {
+        // Deliberately limited to whole numeric options. Units, formulas, multiline
+        // answers and other layouts still require the user's OCR review.
+        let pattern = #"^[\t ]*(10|[1-9])\.([\t ]*)([-+−]?[0-9]+(?:\.[0-9]+)?%?)[\t ]*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
+        let source = text as NSString
+        let label = source.substring(with: match.range(at: 1))
+        guard let ordinal = Int(label) else { return nil }
+        return NumericLine(ordinal: ordinal, label: label, value: source.substring(with: match.range(at: 3)),
+                           hasSpace: match.range(at: 2).length > 0)
+    }
+    private static func block(_ lines: [String]) -> (start: Int, options: [NumericLine])? {
+        let parsed = lines.map(numericLine)
+        guard let start = parsed.lastIndex(where: { $0?.ordinal == 1 }), start > 0,
+              parsed[start - 1] == nil,
+              lines[..<start].contains(where: { $0.rangeOfCharacter(from: .letters) != nil || $0.contains("?") }) else { return nil }
+        let options = parsed[start...].compactMap { $0 }
+        // Require an uninterrupted suffix, including the last visible line. This
+        // rejects dangling/skipped labels, but cannot detect a wholly missing row.
+        guard (3...10).contains(options.count), options.count == lines.count - start,
+              options.enumerated().allSatisfy({ $0.element.ordinal == $0.offset + 1 }),
+              options.contains(where: { !$0.hasSpace }) else { return nil }
+        return (start, options)
+    }
+    public static func needsVerification(_ lines: [String]) -> Bool { block(lines) != nil }
+
+    public static func normalize(_ lines: [OCRLine]) -> String {
+        let original = lines.map(\.text).joined(separator: "\n")
+        guard let block = block(lines.map(\.text)) else { return original }
+        var labelPositions: [CGFloat] = [], valuePositions: [CGFloat] = [], digitWidths: [CGFloat] = []
+        var previousBounds: CGRect?
+        for (offset, option) in block.options.enumerated() {
+            let line = lines[block.start + offset]
+            let glyphs = line.verificationGlyphs
+            let compact = Array(line.text.filter { !$0.isWhitespace })
+            // Exact text agreement is mandatory; a faster recognizer may only
+            // corroborate spacing, never replace or guess the accurate wording.
+            guard glyphs.map(\.character) == compact, glyphs.count >= option.label.count + 2,
+                  valid(line.bounds), glyphs.allSatisfy({ valid($0.bounds) }) else { return original }
+            let periodIndex = option.label.count
+            let label = glyphs[periodIndex - 1].bounds
+            let period = glyphs[periodIndex].bounds
+            let value = glyphs[periodIndex + 1].bounds
+            guard let valueDigit = glyphs.dropFirst(periodIndex + 1).first(where: { $0.character.isNumber }) else { return original }
+            let width = max(label.width, valueDigit.bounds.width)
+            let before = period.minX - label.maxX
+            let after = value.minX - period.maxX
+            // A real word gap must be substantially wider than ordinary decimal
+            // punctuation spacing. Overlapping/word-precision boxes fail closed.
+            guard before >= 0, after >= width * 0.45,
+                  after >= max(before, width * 0.1) * 1.8 else { return original }
+            let vicinity = line.bounds.insetBy(dx: -line.bounds.height * 0.5, dy: -line.bounds.height * 0.5)
+            guard glyphs.allSatisfy({ vicinity.contains(CGPoint(x: $0.bounds.midX, y: $0.bounds.midY)) }) else { return original }
+            if let previousBounds {
+                guard line.bounds.maxY <= previousBounds.minY + min(line.bounds.height, previousBounds.height) * 0.2 else { return original }
+            }
+            previousBounds = line.bounds
+            labelPositions.append(glyphs[0].bounds.minX)
+            valuePositions.append(value.minX)
+            digitWidths.append(width)
+        }
+        guard let width = digitWidths.max(),
+              (labelPositions.max()! - labelPositions.min()!) <= width * 0.75,
+              (valuePositions.max()! - valuePositions.min()!) <= width * 1.5 else { return original }
+        var normalized = lines.map(\.text)
+        for (offset, option) in block.options.enumerated() where !option.hasSpace {
+            normalized[block.start + offset] = "\(option.label). \(option.value)"
+        }
+        return normalized.joined(separator: "\n")
+    }
+    private static func valid(_ rect: CGRect) -> Bool {
+        [rect.minX, rect.minY, rect.width, rect.height, rect.maxX, rect.maxY].allSatisfy { $0.isFinite }
+            && rect.width > 0 && rect.height > 0
+            && rect.minX > 0 && rect.minY > 0 && rect.maxX < 1 && rect.maxY < 1
+    }
+}
+
 public enum MCQParser {
     private struct Marker { let range: NSRange; let label: String; let ordinal: Int }
     public static func parse(_ text: String) -> ParsedQuestion {
@@ -181,6 +283,13 @@ public enum MCQParser {
             guard let start = markers.lastIndex(where: { $0.ordinal == 1 }) else { continue }
             let options = Array(markers[start...])
             guard (2...10).contains(options.count), options.enumerated().allSatisfy({ $0.element.ordinal == $0.offset + 1 }) else { continue }
+            if family == 2 {
+                // Do not silently return a partial list when an OCR-collapsed or
+                // dangling numeric row follows otherwise well-spaced labels.
+                let tail = source.substring(from: options[0].range.location)
+                let ambiguous = #"(?m)^[\t ]*(?:10|[1-9])\.(?:[\t ]*$|(?=[0-9+−-]))"#
+                if tail.range(of: ambiguous, options: .regularExpression) != nil { continue }
+            }
             var choices: [MCQChoice] = []
             for index in options.indices {
                 let start = NSMaxRange(options[index].range)

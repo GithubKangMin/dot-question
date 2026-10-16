@@ -61,10 +61,76 @@ enum OCRService {
                 guard !request.recognitionLanguages.isEmpty else { throw AppError(message: "이 macOS에서 지원되는 OCR 언어가 없습니다.") }
                 let handler = VNImageRequestHandler(url: url, options: [:])
                 try handler.perform([request])
-                return (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
+                let lines = (request.results ?? []).compactMap { observation -> OCRLine? in
+                    guard let candidate = observation.topCandidates(1).first else { return nil }
+                    return OCRLine(text: candidate.string, bounds: observation.boundingBox)
+                }
+                let original = lines.map(\.text).joined(separator: "\n")
+                guard OCRNumericChoiceNormalizer.needsVerification(lines.map(\.text)) else { return original }
+                // Accurate recognition has word-precision boxes, even for a
+                // one-character range. Only the fast pass supplies character
+                // geometry; its wording is never substituted into the result.
+                let verification = VNRecognizeTextRequest()
+                verification.recognitionLevel = .fast
+                verification.usesLanguageCorrection = false
+                do {
+                    let languages = try verification.supportedRecognitionLanguages()
+                    guard languages.contains("en-US") else {
+                        saveNumericDiagnostics(lines, result: original, error: "Fast OCR does not support en-US.")
+                        return original
+                    }
+                    verification.recognitionLanguages = ["en-US"]
+                    try handler.perform([verification])
+                    let checked = lines.map { line in
+                        OCRLine(text: line.text, bounds: line.bounds,
+                                verificationGlyphs: verificationGlyphs(for: line, observations: verification.results ?? []))
+                    }
+                    let normalized = OCRNumericChoiceNormalizer.normalize(checked)
+                    saveNumericDiagnostics(checked, result: normalized)
+                    return normalized
+                } catch {
+                    // Optional verification must never turn usable OCR into a failure.
+                    saveNumericDiagnostics(lines, result: original, error: error.localizedDescription)
+                    return original
+                }
             }
             DispatchQueue.main.async { completion(result) }
         }
+    }
+
+    private static func verificationGlyphs(for line: OCRLine, observations: [VNRecognizedTextObservation]) -> [OCRGlyph] {
+        let vicinity = line.bounds.insetBy(dx: -line.bounds.height * 0.5, dy: 0)
+        return observations.flatMap { observation -> [OCRGlyph] in
+            let box = observation.boundingBox
+            let overlap = box.intersection(vicinity)
+            guard !overlap.isNull, overlap.height >= min(box.height, line.bounds.height) * 0.5,
+                  let candidate = observation.topCandidates(1).first else { return [] }
+            let text = candidate.string
+            return text.indices.compactMap { index -> OCRGlyph? in
+                guard !text[index].isWhitespace,
+                      let glyph = try? candidate.boundingBox(for: index..<text.index(after: index)) else { return nil }
+                return OCRGlyph(character: text[index], bounds: glyph.boundingBox)
+            }
+        }.sorted { $0.bounds.minX < $1.bounds.minX }
+    }
+
+    private static func saveNumericDiagnostics(_ lines: [OCRLine], result: String, error: String? = nil) {
+        // Synthetic CI evidence only. Production captures and recognized text are
+        // never persisted by this diagnostic path.
+        guard let directory = RuntimeConfiguration.liveDirectory else { return }
+        let original = lines.map(\.text).joined(separator: "\n")
+        let payload: [String: Any] = ["original": original,
+            "normalized": result, "verificationError": error ?? "",
+            "decision": result == original ? "unchanged-insufficient-layout-evidence" : "restored-numeric-separators",
+            "lines": lines.map { line -> [String: Any] in
+                ["text": line.text, "bounds": [line.bounds.minX, line.bounds.minY, line.bounds.width, line.bounds.height],
+                 "glyphs": line.verificationGlyphs.map { glyph -> [String: Any] in
+                    ["character": String(glyph.character), "x": glyph.bounds.minX,
+                     "y": glyph.bounds.minY, "width": glyph.bounds.width, "height": glyph.bounds.height]
+                }]
+            }]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .prettyPrinted]) else { return }
+        try? data.write(to: directory.appendingPathComponent("ocr-numeric-\(UUID().uuidString).json"), options: .atomic)
     }
 }
 
@@ -135,7 +201,7 @@ final class OllamaClient {
             "model": model, "stream": false, "format": Self.answerSchema(questionPayload: question),
             "system": system,
             "prompt": question,
-            "options": ["temperature": 0.2, "num_predict": 2048, "num_ctx": 16384]
+            "options": ["temperature": 0.2, "num_predict": 2048, "num_ctx": RuntimeConfiguration.isLiveTest ? 4096 : 16384]
         ])
         generation += 1
         let token = generation
