@@ -118,7 +118,7 @@ final class OllamaClient {
                 "required": ["selected_choice", "answer", "explanation", "citations", "uncertainty"],
                 "properties": ["selected_choice": choice,
                     "answer": ["type": "string"], "explanation": ["type": "string"],
-                    "citations": citations, "uncertainty": ["type": ["string", "null"]]]]
+                    "citations": citations, "uncertainty": ["type": ["string", "null"], "description": "JSON null when confident. A nonempty string only for a genuine unresolved doubt that prevents confirming the answer. Reasoning belongs in explanation, not here."]]]
     }
     private var generation = 0
     func answer(endpoint: String, model: String, question: String, system: String, completion: @escaping (Result<String, Error>) -> Void) throws {
