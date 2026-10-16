@@ -23,7 +23,7 @@ run_capture() {
 import json,sys
 p=json.load(open(sys.argv[1]))
 assert p['hotkeyStatus']==0, p
-assert p['model']=='qwen2.5:1.5b', p
+assert p['model']=='qwen2.5:3b', p
 assert p['screenCaptureAllowed'] is True, 'BLOCKED: app screen capture permission absent; no settings changed'
 assert p['windowVisible'] is False, p
 PY
@@ -50,8 +50,8 @@ export OLLAMA_MODELS="$TOOLS/models" OLLAMA_NUM_PARALLEL=1
 "$OLLAMA" serve > "$OUT/ollama-server.log" 2>&1 & OLLAMA_PID=$!
 for i in {1..30}; do curl --fail --silent http://127.0.0.1:11434/api/tags > "$OUT/model-tags-before.json" && break; sleep 1; done
 "$OLLAMA" --version > "$OUT/ollama-version.txt"
-"$OLLAMA" pull qwen2.5:1.5b > "$OUT/model-pull.log" 2>&1
+"$OLLAMA" pull qwen2.5:3b > "$OUT/model-pull.log" 2>&1
 curl --fail --silent http://127.0.0.1:11434/api/tags > "$OUT/model-tags.json"
 # Warm model without an answer fixture; the actual question comes only through OCR.
-curl --fail --silent --max-time 180 http://127.0.0.1:11434/api/generate -d '{"model":"qwen2.5:1.5b","prompt":"","stream":false,"keep_alive":"5m","options":{"num_ctx":16384}}' > "$OUT/model-warmup.json"
+curl --fail --silent --max-time 180 http://127.0.0.1:11434/api/generate -d '{"model":"qwen2.5:3b","prompt":"","stream":false,"keep_alive":"5m","options":{"num_ctx":16384}}' > "$OUT/model-warmup.json"
 run_capture --record "$OUT/real-model"

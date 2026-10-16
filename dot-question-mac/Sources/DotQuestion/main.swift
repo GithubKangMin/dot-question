@@ -100,8 +100,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         if RuntimeConfiguration.isLiveTest {
             RuntimeConfiguration.preferences.set(true, forKey: "quickMode")
             RuntimeConfiguration.preferences.set(1, forKey: "menuStyle")
-            RuntimeConfiguration.preferences.set("qwen2.5:1.5b", forKey: "model")
-            model.stringValue = "qwen2.5:1.5b"
+            RuntimeConfiguration.preferences.set("qwen2.5:3b", forKey: "model")
+            model.stringValue = "qwen2.5:3b"
         }
         buildWindow()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
