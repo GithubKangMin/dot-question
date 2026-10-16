@@ -123,10 +123,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                         try? data.write(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
                     }
                 }
+                if let index = CommandLine.arguments.firstIndex(of: "--screenshots-dir") {
+                    do {
+                        guard CommandLine.arguments.indices.contains(index + 1) else {
+                            throw AppError(message: "--screenshots-dir requires a path")
+                        }
+                        try self.saveSmokeScreenshots(to: URL(fileURLWithPath: CommandLine.arguments[index + 1]))
+                    } catch {
+                        fputs("SCREENSHOT ERROR: \(error)\n", stderr)
+                        exit(1)
+                    }
+                }
                 try? FileManager.default.removeItem(at: RuntimeConfiguration.smokeDirectory)
                 DispatchQueue.main.async { NSApp.terminate(nil) }
             }
         }
+    }
+    /// Captures the running app's real AppKit views using synthetic local fixtures.
+    /// This is app-view rendering, not a whole-desktop or OS-menu-bar capture.
+    private func saveSmokeScreenshots(to directory: URL) throws {
+        precondition(RuntimeConfiguration.isSmokeTest)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let fixture = RuntimeConfiguration.smokeDirectory.appendingPathComponent("CI-synthetic-study.txt")
+        try "광합성은 빛 에너지를 이용해 이산화탄소와 물로 포도당과 산소를 만듭니다.".write(to: fixture, atomically: true, encoding: .utf8)
+        try documents.importDocument(fixture)
+        refreshDocuments()
+        question.string = "[CI 합성 질문] 광합성에 필요한 에너지는?\n1. 소리\n2. 빛\n3. 바람"
+        let sources = documents.retrieve(query: question.string)
+        let prepared = try StudyPromptBuilder.build(question: question.string, sources: sources, requiresSources: true)
+        let payload: [String: Any] = ["selected_choice": "2", "answer": "빛 에너지", "explanation": "합성 자료에서 광합성은 빛 에너지를 이용한다고 설명합니다. (CI 고정 응답, 실제 AI 호출 아님)", "citations": sources.map { $0.id }, "uncertainty": NSNull()]
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        let result = try StructuredAnswerParser.parse(String(decoding: data, as: UTF8.self), question: prepared.question, sources: sources)
+        answer.string = result.formattedText
+        lastChoice = result.selectedChoice
+        lastOptions = prepared.question.choices.map { $0.label }
+        menuAnswer.state = .on
+        renderMenuAnswer()
+        status.stringValue = "CI 합성 자료 · 고정 응답 검증 완료 · 네트워크/API 호출 없음"
+        window.contentView?.layoutSubtreeIfNeeded()
+        func save(_ view: NSView, _ filename: String) throws {
+            view.layoutSubtreeIfNeeded()
+            guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
+                throw AppError(message: "Cannot render \(filename)")
+            }
+            view.cacheDisplay(in: view.bounds, to: bitmap)
+            guard let png = bitmap.representation(using: .png, properties: [:]), png.count > 100 else {
+                throw AppError(message: "Empty render \(filename)")
+            }
+            try png.write(to: directory.appendingPathComponent(filename))
+        }
+        guard let content = window.contentView,
+              let scroll = content.subviews.first as? NSScrollView,
+              let document = scroll.documentView,
+              let button = statusItem.button else { throw AppError(message: "Missing app views") }
+        try save(document, "macos-full-app-view.png")
+        document.scrollToVisible(answer.convert(answer.bounds, to: document))
+        content.layoutSubtreeIfNeeded()
+        try save(content, "macos-answer-window-app-view.png")
+        try save(button, "macos-status-button-app-view.png")
+        try "Real AppKit app views. Synthetic question, imported local source and validated fixed response. Not a desktop screenshot. Status-button image is the app's own view, not proof of OS menu-bar placement. No OCR, live model, API, clipboard, global shortcut or LED operation.\n".write(to: directory.appendingPathComponent("capture-context.txt"), atomically: true, encoding: .utf8)
+        print("SCREENSHOTS: saved real AppKit views to \(directory.path)")
     }
     private func buildWindow() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1000, height: min(820, (NSScreen.main?.visibleFrame.height ?? 900) - 80)), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)

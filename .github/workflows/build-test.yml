@@ -45,6 +45,14 @@ jobs:
           python3 scripts/check_source.py
       - name: XCTest and release application
         run: bash build.command
+      - name: Capture actual AppKit views with isolated synthetic fixtures
+        run: '"dist/dot question.app/Contents/MacOS/DotQuestion" --smoke-test --screenshots-dir "$PWD/dist/screenshots"'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dot-question-macos-screenshots
+          path: dot-question-mac/dist/screenshots
+          if-no-files-found: error
+          retention-days: 1
       - name: Package ad-hoc-signed arm64 application
         run: |
           test "$(uname -m)" = arm64
@@ -82,6 +90,14 @@ jobs:
         run: python -m pip install --no-cache-dir -r requirements-build.txt
       - name: Run all synthetic and offscreen tests
         run: python ../ci/test-windows.py
+      - name: Capture actual Qt widgets with synthetic fixtures
+        run: python ../ci/screenshot-windows.py dist/screenshots
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dot-question-windows-screenshots
+          path: dot-question-windows/dist/screenshots
+          if-no-files-found: error
+          retention-days: 1
       - name: Build unsigned Windows application
         run: python -m PyInstaller --noconfirm --clean --windowed --onedir --name DotQuestion app.py
       - name: Package complete application folder
