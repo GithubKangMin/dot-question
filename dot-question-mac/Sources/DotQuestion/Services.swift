@@ -1,6 +1,7 @@
 import Foundation
 import AppKit
 import Vision
+import CoreImage
 import QuestionCore
 
 struct AppError: LocalizedError {
@@ -70,23 +71,34 @@ enum OCRService {
                 // Accurate recognition has word-precision boxes, even for a
                 // one-character range. Only the fast pass supplies character
                 // geometry; its wording is never substituted into the result.
-                let verification = VNRecognizeTextRequest()
-                verification.recognitionLevel = .fast
-                verification.usesLanguageCorrection = false
+                let verification = numericVerificationRequest()
                 do {
                     let languages = try verification.supportedRecognitionLanguages()
                     guard languages.contains("en-US") else {
                         saveNumericDiagnostics(lines, result: original, error: "Fast OCR does not support en-US.")
                         return original
                     }
-                    verification.recognitionLanguages = ["en-US"]
                     try handler.perform([verification])
-                    let checked = lines.map { line in
+                    var checked = lines.map { line in
                         OCRLine(text: line.text, bounds: line.bounds,
                                 verificationGlyphs: verificationGlyphs(for: line, observations: verification.results ?? []))
                     }
+                    var passes = [verificationDiagnostics(verification.results ?? [], name: "full-image")]
+                    var retryError: String?
+                    if let region = OCRNumericChoiceNormalizer.missingGlyphRegion(checked) {
+                        do {
+                            if let retry = try enlargedNumericVerification(url, region: region) {
+                                passes.append(verificationDiagnostics(retry.observations, name: "enlarged-numeric-crop", region: retry.region))
+                                checked = checked.map { line in
+                                    guard line.verificationGlyphs.isEmpty else { return line }
+                                    return OCRLine(text: line.text, bounds: line.bounds,
+                                        verificationGlyphs: verificationGlyphs(for: line, observations: retry.observations, region: retry.region))
+                                }
+                            }
+                        } catch { retryError = error.localizedDescription }
+                    }
                     let normalized = OCRNumericChoiceNormalizer.normalize(checked)
-                    saveNumericDiagnostics(checked, result: normalized)
+                    saveNumericDiagnostics(checked, result: normalized, error: retryError, passes: passes)
                     return normalized
                 } catch {
                     // Optional verification must never turn usable OCR into a failure.
@@ -98,36 +110,96 @@ enum OCRService {
         }
     }
 
-    private static func verificationGlyphs(for line: OCRLine, observations: [VNRecognizedTextObservation]) -> [OCRGlyph] {
+    private static func numericVerificationRequest() -> VNRecognizeTextRequest {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .fast
+        request.usesLanguageCorrection = false
+        request.recognitionLanguages = ["en-US"]
+        // The default is 1/32 of image height. Only the optional verifier uses
+        // this smaller detection floor; all spacing/decimal guards stay intact.
+        request.minimumTextHeight = 0.005
+        return request
+    }
+
+    private static func enlargedNumericVerification(_ url: URL, region: CGRect) throws
+        -> (observations: [VNRecognizedTextObservation], region: CGRect)? {
+        guard let source = CIImage(contentsOf: url), !source.extent.isEmpty else { return nil }
+        let extent = source.extent
+        let pixels = CGRect(x: extent.minX + region.minX * extent.width,
+                            y: extent.minY + region.minY * extent.height,
+                            width: region.width * extent.width, height: region.height * extent.height)
+            .integral.intersection(extent)
+        guard !pixels.isEmpty else { return nil }
+        // One retry, using at most a 2048x2048 image. Integer scaling keeps the
+        // crop-to-original coordinate mapping exact and never rewrites its text.
+        let scale = min(3, floor(2048 / max(pixels.width, pixels.height)))
+        guard scale >= 2 else { return nil }
+        let cropped = source.cropped(to: pixels)
+            .transformed(by: CGAffineTransform(translationX: -pixels.minX, y: -pixels.minY))
+            .transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        let context = CIContext(options: [.useSoftwareRenderer: true])
+        guard let image = context.createCGImage(cropped, from: cropped.extent) else { return nil }
+        let request = numericVerificationRequest()
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        let actualRegion = CGRect(x: (pixels.minX - extent.minX) / extent.width,
+                                  y: (pixels.minY - extent.minY) / extent.height,
+                                  width: pixels.width / extent.width, height: pixels.height / extent.height)
+        return (request.results ?? [], actualRegion)
+    }
+
+    private static func candidateGlyphs(_ candidate: VNRecognizedText, region: CGRect) -> [OCRGlyph] {
+        let text = candidate.string
+        return text.indices.compactMap { index -> OCRGlyph? in
+            guard !text[index].isWhitespace,
+                  let glyph = try? candidate.boundingBox(for: index..<text.index(after: index)) else { return nil }
+            return OCRGlyph(character: text[index], bounds: OCRNumericChoiceNormalizer.fullImageBounds(glyph.boundingBox, in: region))
+        }
+    }
+
+    private static func verificationGlyphs(for line: OCRLine, observations: [VNRecognizedTextObservation],
+                                           region: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)) -> [OCRGlyph] {
         let vicinity = line.bounds.insetBy(dx: -line.bounds.height * 0.5, dy: 0)
         return observations.flatMap { observation -> [OCRGlyph] in
-            let box = observation.boundingBox
+            let box = OCRNumericChoiceNormalizer.fullImageBounds(observation.boundingBox, in: region)
             let overlap = box.intersection(vicinity)
             guard !overlap.isNull, overlap.height >= min(box.height, line.bounds.height) * 0.5,
                   let candidate = observation.topCandidates(1).first else { return [] }
-            let text = candidate.string
-            return text.indices.compactMap { index -> OCRGlyph? in
-                guard !text[index].isWhitespace,
-                      let glyph = try? candidate.boundingBox(for: index..<text.index(after: index)) else { return nil }
-                return OCRGlyph(character: text[index], bounds: glyph.boundingBox)
-            }
+            return candidateGlyphs(candidate, region: region)
         }.sorted { $0.bounds.minX < $1.bounds.minX }
     }
 
-    private static func saveNumericDiagnostics(_ lines: [OCRLine], result: String, error: String? = nil) {
+    private static func verificationDiagnostics(_ observations: [VNRecognizedTextObservation], name: String,
+                                               region: CGRect = CGRect(x: 0, y: 0, width: 1, height: 1)) -> [String: Any] {
+        guard RuntimeConfiguration.isLiveTest else { return [:] }
+        return ["name": name, "region": [region.minX, region.minY, region.width, region.height],
+            "minimumTextHeight": 0.005,
+            "observations": observations.map { observation -> [String: Any] in
+                let candidate = observation.topCandidates(1).first
+                let bounds = OCRNumericChoiceNormalizer.fullImageBounds(observation.boundingBox, in: region)
+                return ["text": candidate?.string ?? "", "confidence": candidate?.confidence ?? 0,
+                        "bounds": [bounds.minX, bounds.minY, bounds.width, bounds.height],
+                        "glyphs": candidate.map { candidateGlyphs($0, region: region).map(glyphDiagnostics) } ?? []]
+            }]
+    }
+
+    private static func glyphDiagnostics(_ glyph: OCRGlyph) -> [String: Any] {
+        ["character": String(glyph.character), "x": glyph.bounds.minX,
+         "y": glyph.bounds.minY, "width": glyph.bounds.width, "height": glyph.bounds.height]
+    }
+
+    private static func saveNumericDiagnostics(_ lines: [OCRLine], result: String, error: String? = nil,
+                                              passes: [[String: Any]] = []) {
         // Synthetic CI evidence only. Production captures and recognized text are
         // never persisted by this diagnostic path.
         guard let directory = RuntimeConfiguration.liveDirectory else { return }
         let original = lines.map(\.text).joined(separator: "\n")
         let payload: [String: Any] = ["original": original,
             "normalized": result, "verificationError": error ?? "",
+            "verificationPasses": passes,
             "decision": result == original ? "unchanged-insufficient-layout-evidence" : "restored-numeric-separators",
             "lines": lines.map { line -> [String: Any] in
                 ["text": line.text, "bounds": [line.bounds.minX, line.bounds.minY, line.bounds.width, line.bounds.height],
-                 "glyphs": line.verificationGlyphs.map { glyph -> [String: Any] in
-                    ["character": String(glyph.character), "x": glyph.bounds.minX,
-                     "y": glyph.bounds.minY, "width": glyph.bounds.width, "height": glyph.bounds.height]
-                }]
+                 "glyphs": line.verificationGlyphs.map(glyphDiagnostics)]
             }]
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys, .prettyPrinted]) else { return }
         try? data.write(to: directory.appendingPathComponent("ocr-numeric-\(UUID().uuidString).json"), options: .atomic)

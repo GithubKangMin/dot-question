@@ -28,6 +28,11 @@ private struct QuestionFixture {
         question: "Which planet is known as Red Planet?",
         choices: ["1. Venus", "2. Jupiter", "3. Mars", "4. Saturn", "5. Neptune"],
         expectedOrdinal: 3)
+    // Kept separate from the delivered word-option video fixtures.
+    static let numericArithmetic = QuestionFixture(
+        question: "Which number equals 2 + 2?",
+        choices: ["1. 3", "2. 4", "3. 5", "4. 6", "5. 7"],
+        expectedOrdinal: 2)
     static let sequence = [
         QuestionFixture(question: "Which number equals 2 + 2?",
                         choices: ["1. Three", "2. Four", "3. Five", "4. Six", "5. Seven"],
@@ -105,6 +110,7 @@ private final class QuestionView: NSView {
 private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDelegate, SCRecordingOutputDelegate {
     private let directory: URL
     private let probeOnly: Bool
+    private let numericProbeOnly: Bool
     private var fixture: QuestionWindow?
     private var fixtureView: QuestionView?
     private var clockTimer: Timer?
@@ -126,20 +132,22 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
     private var recordingStopTime: TimeInterval?
     private var watchdog: DispatchWorkItem?
 
-    init(directory: URL, probeOnly: Bool) {
+    init(directory: URL, probeOnly: Bool, numericProbeOnly: Bool = false) {
         self.directory = directory
         self.probeOnly = probeOnly
+        self.numericProbeOnly = numericProbeOnly
         super.init()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Includes preparation and encoder finalization. Never wait indefinitely
         // for a permission dialog or an unavailable WindowServer.
+        let safetyDeadline = numericProbeOnly ? 120 : 1000
         let watchdog = DispatchWorkItem { [weak self] in
-            self?.failAndExit("Harness exceeded the 1000-second safety deadline.")
+            self?.failAndExit("Harness exceeded the \(safetyDeadline)-second safety deadline.")
         }
         self.watchdog = watchdog
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1000, execute: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + .seconds(safetyDeadline), execute: watchdog)
         Task { @MainActor in
             do {
                 try await self.run()
@@ -203,7 +211,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         window.isOpaque = true
         window.hasShadow = false
         window.isReleasedWhenClosed = false
-        let questions = probeOnly ? [QuestionFixture.redPlanet] : QuestionFixture.sequence
+        let questions = numericProbeOnly ? [QuestionFixture.numericArithmetic]
+            : (probeOnly ? [QuestionFixture.redPlanet] : QuestionFixture.sequence)
         let view = QuestionView(frame: NSRect(origin: .zero, size: screen.visibleFrame.size))
         view.question = questions[0].question
         view.choices = questions[0].choices
@@ -307,8 +316,9 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             let beforeName = probeOnly ? "before-shortcut.png" : "\(prefix)-before-shortcut.png"
             try await saveScreenshot(filter: filter, configuration: configuration, name: beforeName)
 
-            // Both receipt and answer waits share one 300-second deadline.
-            let deadline = ProcessInfo.processInfo.systemUptime + 300
+            // Numeric OCR never needs a model and has a shorter bounded wait.
+            // The existing normal-probe/full-model deadlines remain unchanged.
+            let deadline = ProcessInfo.processInfo.systemUptime + (numericProbeOnly ? 60 : 300)
             let postedAt = elapsed
             try await postShortcut()
             shortcutPostTime = postedAt
@@ -352,11 +362,17 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             try await pause(probeOnly ? 3 : 10)
             let afterName = probeOnly ? "after-answer.png" : "\(prefix)-after-answer.png"
             try await saveScreenshot(filter: filter, configuration: configuration, name: afterName)
+            let normalizedLines = (result["questionOCR"] as? String ?? "")
+                .components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespaces) }
+            let normalizedNumericOptions = QuestionFixture.numericArithmetic.choices.allSatisfy { normalizedLines.contains($0) }
             let valid = result["windowVisible"] as? Bool == false
                 && result["successful"] is Bool
                 && result["persistentWifi"] as? Bool == true
                 && result["menuTitle"] as? String == ""
                 && result["statusItemWidth"] as? Double == 34
+                && (!numericProbeOnly || (result["parsedChoiceLabels"] as? [String] == ["1", "2", "3", "4", "5"]
+                    && result["parsedChoiceTexts"] as? [String] == ["3", "4", "5", "6", "7"]
+                    && normalizedNumericOptions && result["wifiFilledBars"] as? Int == 0))
                 && (probeOnly || result["wifiFilledBars"] as? Int == question.expectedOrdinal)
                 && (probeOnly || (result["successful"] as? Bool == true
                                  && result["ordinal"] as? Int == question.expectedOrdinal))
@@ -374,7 +390,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             questionResults.append(entry)
             try saveJSON(["questions": questionResults], as: "question-results.json")
             guard valid else {
-                let requirement = probeOnly ? "a Boolean successful field" : "successful true and ordinal \(question.expectedOrdinal)"
+                let requirement = numericProbeOnly ? "parsed labels 1 through 5 and numeric option texts 3 through 7"
+                    : (probeOnly ? "a Boolean successful field" : "successful true and ordinal \(question.expectedOrdinal)")
                 throw HarnessError(message: "Question \(currentQuestionNumber) failed: require windowVisible false and \(requirement). Inspect \(prefix)-result.json and the uninterrupted movie.")
             }
             note("question-validated", ["expectedOrdinal": question.expectedOrdinal])
@@ -398,7 +415,8 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
         }
         try saveJSON([
             "successful": true, "continuousActualDesktop": true,
-            "mode": probeOnly ? "permission-and-hotkey-probe" : "three-live-model-answers",
+            "mode": numericProbeOnly ? "numeric-options-ocr-probe"
+                : (probeOnly ? "permission-and-hotkey-probe" : "three-live-model-answers"),
             "modelAnswerRequired": !probeOnly,
             "questionCount": questions.count, "questions": questionResults,
             "movie": file.lastPathComponent, "movieBytes": size,
@@ -410,7 +428,7 @@ private final class DesktopHarness: NSObject, NSApplicationDelegate, SCStreamDel
             "resultObservedAtSeconds": resultTime ?? -1,
             "productionResult": result, "capture": captureDescription,
             "events": events], as: "harness-result.json")
-        printJSON(["successful": true, "probeOnly": probeOnly, "questionCount": questions.count,
+        printJSON(["successful": true, "probeOnly": probeOnly, "numericProbeOnly": numericProbeOnly, "questionCount": questions.count,
                    "movie": file.path, "recordedSeconds": duration])
     }
 
@@ -556,14 +574,15 @@ private struct Main {
             printJSON(report)
             exit(report["screenCaptureAllowed"] as? Bool == true && report["postEventAllowed"] as? Bool == true ? 0 : 3)
         }
-        guard CommandLine.arguments.count == 3, ["--record", "--probe"].contains(CommandLine.arguments[1]) else {
-            fputs("Usage: mac-desktop-harness --preflight | --record OUTPUT_DIRECTORY | --probe OUTPUT_DIRECTORY\n", stderr)
+        guard CommandLine.arguments.count == 3, ["--record", "--probe", "--probe-numeric"].contains(CommandLine.arguments[1]) else {
+            fputs("Usage: mac-desktop-harness --preflight | --record OUTPUT_DIRECTORY | --probe OUTPUT_DIRECTORY | --probe-numeric OUTPUT_DIRECTORY\n", stderr)
             exit(2)
         }
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         let delegate = DesktopHarness(directory: URL(fileURLWithPath: CommandLine.arguments[2], isDirectory: true),
-                                      probeOnly: CommandLine.arguments[1] == "--probe")
+                                      probeOnly: CommandLine.arguments[1] != "--record",
+                                      numericProbeOnly: CommandLine.arguments[1] == "--probe-numeric")
         app.delegate = delegate
         withExtendedLifetime(delegate) { app.run() }
     }

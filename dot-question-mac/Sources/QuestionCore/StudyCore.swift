@@ -202,6 +202,27 @@ public enum OCRNumericChoiceNormalizer {
     }
     public static func needsVerification(_ lines: [String]) -> Bool { block(lines) != nil }
 
+    /// A single bounded retry may enlarge the numeric block when fast Vision did
+    /// not detect its short rows. Existing contradictory glyphs are not replaced.
+    public static func missingGlyphRegion(_ lines: [OCRLine]) -> CGRect? {
+        guard let block = block(lines.map(\.text)) else { return nil }
+        let options = lines[block.start...]
+        guard options.contains(where: { $0.verificationGlyphs.isEmpty }),
+              options.allSatisfy({ valid($0.bounds) }),
+              let height = options.map({ $0.bounds.height }).max() else { return nil }
+        let bounds = options.reduce(CGRect.null) { $0.union($1.bounds) }
+        return bounds.insetBy(dx: -height, dy: -height * 0.5)
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+    }
+
+    /// Convert crop-relative Vision rectangles back to the original image before
+    /// matching rows or measuring spacing. Both coordinate systems use bottom-left.
+    public static func fullImageBounds(_ bounds: CGRect, in region: CGRect) -> CGRect {
+        CGRect(x: region.minX + bounds.minX * region.width,
+               y: region.minY + bounds.minY * region.height,
+               width: bounds.width * region.width, height: bounds.height * region.height)
+    }
+
     public static func normalize(_ lines: [OCRLine]) -> String {
         let original = lines.map(\.text).joined(separator: "\n")
         guard let block = block(lines.map(\.text)) else { return original }

@@ -38,6 +38,25 @@ p=json.load(open(sys.argv[1]))
 for text in ['Red Planet', 'Venus', 'Jupiter', 'Mars', 'Saturn', 'Neptune']:
     assert text.lower() in p['questionOCR'].lower(), p
 PY_CHECK
+# Explicit focused checks still use actual capture, global shortcuts and OCR.
+# Complete both probes, then stop before any vendor/model download or server.
+if [[ "${DOT_OCR_PROBE_ONLY:-0}" == "1" ]]; then
+  mkdir -p "$OUT/numeric-probe"
+  run_capture --probe-numeric "$OUT/numeric-probe"
+  python3 - "$OUT/numeric-probe/live-result.json" <<'PY_NUMERIC'
+import json,sys
+p=json.load(open(sys.argv[1]))
+assert p['parsedChoiceLabels'] == ['1','2','3','4','5'], p
+assert p['parsedChoiceTexts'] == ['3','4','5','6','7'], p
+for index,value in enumerate(['3','4','5','6','7'], start=1):
+    assert f'{index}. {value}' in p['questionOCR'].splitlines(), p
+assert p['windowVisible'] is False and p['persistentWifi'] is True, p
+assert p['wifiFilledBars'] == 0, p
+print('Actual-screen numeric OCR probe passed; no model answer was required.')
+PY_NUMERIC
+  printf '%s\n' 'Focused OCR probes complete. No Ollama download, server, or model inference was run.'
+  exit 0
+fi
 # Inspect the actual standard runner; never assume a larger paid machine.
 sysctl hw.memsize hw.ncpu > "$OUT/runner-resources.txt"
 vm_stat >> "$OUT/runner-resources.txt"

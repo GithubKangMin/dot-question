@@ -65,7 +65,9 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
-      - name: Record actual desktop and global shortcut with a real local model
+      - name: Record actual desktop OCR probes or full local-model answers
+        env:
+          DOT_OCR_PROBE_ONLY: ${{ github.event_name == 'push' && contains(github.event.head_commit.message, '[numeric-ocr-only]') && '1' || '0' }}
         run: bash ../ci/record-mac-live.sh
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()

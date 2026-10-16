@@ -634,6 +634,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                                "windowVisible": window.isVisible, "questionOCR": question.string,
                                "validatedAnswer": answer.string, "status": message,
                                "parsedChoiceLabels": MCQParser.parse(question.string).choices.map { $0.label },
+                               "parsedChoiceTexts": MCQParser.parse(question.string).choices.map { $0.text },
                                "provider": "local Ollama", "model": model.stringValue], filename: "live-result.json")
         }
     }

@@ -134,6 +134,51 @@ final class StudyCoreTests: XCTestCase {
         XCTAssertEqual(MCQParser.parse(OCRNumericChoiceNormalizer.normalize(lines)).choices.count, 5)
     }
 
+    func testNumericRetryRegionOnlyIncludesCandidateRowsWithMissingGlyphEvidence() throws {
+        let lines = numericOCRLines()
+        XCTAssertNil(OCRNumericChoiceNormalizer.missingGlyphRegion(lines))
+        let missing = lines.map { OCRLine(text: $0.text, bounds: $0.bounds) }
+        let region = try XCTUnwrap(OCRNumericChoiceNormalizer.missingGlyphRegion(missing))
+        XCTAssertTrue(CGRect(x: 0, y: 0, width: 1, height: 1).contains(region))
+        XCTAssertTrue(missing.dropFirst().allSatisfy { region.contains($0.bounds) })
+        XCTAssertFalse(region.intersects(lines[0].bounds))
+        var incomplete = missing
+        incomplete[incomplete.count - 1] = OCRLine(text: "5.", bounds: lines.last!.bounds)
+        XCTAssertNil(OCRNumericChoiceNormalizer.missingGlyphRegion(incomplete))
+    }
+    func testNumericRetryDoesNotReplaceContradictoryExistingGlyphs() {
+        var lines = numericOCRLines()
+        var glyphs = lines[1].verificationGlyphs
+        glyphs[2] = OCRGlyph(character: "9", bounds: glyphs[2].bounds)
+        lines[1] = OCRLine(text: lines[1].text, bounds: lines[1].bounds, verificationGlyphs: glyphs)
+        XCTAssertNil(OCRNumericChoiceNormalizer.missingGlyphRegion(lines))
+        XCTAssertEqual(OCRNumericChoiceNormalizer.normalize(lines), lines.map(\.text).joined(separator: "\n"))
+    }
+    func testNumericCropGeometryMapsBackBeforeApplyingUnchangedGapGuards() throws {
+        for gap in [CGFloat(3), CGFloat(9)] {
+            let lines = numericOCRLines(gap: gap)
+            let missing = lines.map { OCRLine(text: $0.text, bounds: $0.bounds) }
+            let region = try XCTUnwrap(OCRNumericChoiceNormalizer.missingGlyphRegion(missing))
+            let remapped = lines.map { line in
+                OCRLine(text: line.text, bounds: line.bounds, verificationGlyphs: line.verificationGlyphs.map { glyph in
+                    let cropBounds = CGRect(x: (glyph.bounds.minX - region.minX) / region.width,
+                                            y: (glyph.bounds.minY - region.minY) / region.height,
+                                            width: glyph.bounds.width / region.width,
+                                            height: glyph.bounds.height / region.height)
+                    let restored = OCRNumericChoiceNormalizer.fullImageBounds(cropBounds, in: region)
+                    XCTAssertEqual(restored.minX, glyph.bounds.minX, accuracy: 0.000001)
+                    XCTAssertEqual(restored.minY, glyph.bounds.minY, accuracy: 0.000001)
+                    return OCRGlyph(character: glyph.character, bounds: restored)
+                })
+            }
+            let normalized = OCRNumericChoiceNormalizer.normalize(remapped)
+            XCTAssertEqual(MCQParser.parse(normalized).choices.count, gap == 9 ? 5 : 0)
+            if gap == 3 { XCTAssertEqual(normalized, lines.map(\.text).joined(separator: "\n")) }
+        }
+        XCTAssertEqual(OCRNumericChoiceNormalizer.fullImageBounds(CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),
+            in: CGRect(x: 0, y: 0, width: 1, height: 1)), CGRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4))
+    }
+
     func testLiveRecordingQuestionsPreserveAllFiveLabels() throws {
         let questions = [
             "Which number equals 2 + 2?\n1. Three\n2. Four\n3. Five\n4. Six\n5. Seven",
