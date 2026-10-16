@@ -97,6 +97,29 @@ final class OllamaClient {
         let remote_model: String?
         let remote_host: String?
     }
+    /// Constrain response shape and identifiers, never the correct answer.
+    /// null remains available so the model can explicitly decline an answer.
+    static func answerSchema(questionPayload: String) -> [String: Any] {
+        let payload = questionPayload.data(using: .utf8)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        var choice: [String: Any] = ["type": ["string", "null"],
+            "description": "Copy the label of the correct choice, not its text. If unknown, use null and explain uncertainty."]
+        if let labels = payload?["allowed_choice_labels"] as? [String] {
+            choice["enum"] = labels.map { $0 as Any } + [NSNull()]
+        }
+        var citations: [String: Any] = ["type": "array", "items": ["type": "string"],
+            "description": "Only IDs from supplied sources. No URLs or invented citations. Empty array when no sources."]
+        if let sources = payload?["sources"] as? [[String: Any]] {
+            let ids = sources.compactMap { $0["id"] as? String }
+            if ids.isEmpty { citations["maxItems"] = 0 }
+            else { citations["items"] = ["type": "string", "enum": ids] }
+        }
+        return ["type": "object", "additionalProperties": false,
+                "required": ["selected_choice", "answer", "explanation", "citations", "uncertainty"],
+                "properties": ["selected_choice": choice,
+                    "answer": ["type": "string"], "explanation": ["type": "string"],
+                    "citations": citations, "uncertainty": ["type": ["string", "null"]]]]
+    }
     private var generation = 0
     func answer(endpoint: String, model: String, question: String, system: String, completion: @escaping (Result<String, Error>) -> Void) throws {
         let url = try LocalEndpoint.generateURL(endpoint)
@@ -109,7 +132,7 @@ final class OllamaClient {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": model, "stream": false, "format": "json",
+            "model": model, "stream": false, "format": Self.answerSchema(questionPayload: question),
             "system": system,
             "prompt": question,
             "options": ["temperature": 0.2, "num_predict": 2048, "num_ctx": 16384]

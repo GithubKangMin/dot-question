@@ -47,6 +47,24 @@ final class OllamaMockTests: XCTestCase {
         withExtendedLifetime(api) {}
         return (try XCTUnwrap(outcome), paths)
     }
+    func testSchemaConstrainsIdentifiersWithoutChoosingAnswer() throws {
+        let schema = OllamaClient.answerSchema(questionPayload: "{\"allowed_choice_labels\":[\"A\",\"B\",\"C\"],\"sources\":[]}")
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let choice = try XCTUnwrap(properties["selected_choice"] as? [String: Any])
+        let values = try XCTUnwrap(choice["enum"] as? [Any])
+        XCTAssertEqual(values.compactMap { $0 as? String }, ["A", "B", "C"])
+        XCTAssertTrue(values.last is NSNull)
+        let citations = try XCTUnwrap(properties["citations"] as? [String: Any])
+        XCTAssertEqual(citations["maxItems"] as? Int, 0)
+        XCTAssertEqual(schema["additionalProperties"] as? Bool, false)
+    }
+    func testSchemaAllowsOnlyProvidedSourceIDs() throws {
+        let schema = OllamaClient.answerSchema(questionPayload: "{\"allowed_choice_labels\":[],\"sources\":[{\"id\":\"synthetic-1\"}]}")
+        let properties = try XCTUnwrap(schema["properties"] as? [String: Any])
+        let citations = try XCTUnwrap(properties["citations"] as? [String: Any])
+        let items = try XCTUnwrap(citations["items"] as? [String: Any])
+        XCTAssertEqual(items["enum"] as? [String], ["synthetic-1"])
+    }
     func testInstalledModelPreflightThenSyntheticResponse() throws {
         let (result, paths) = try run(tags: "{\"models\":[{\"name\":\"synthetic:latest\"}]}")
         XCTAssertEqual(try result.get(), "synthetic answer")
