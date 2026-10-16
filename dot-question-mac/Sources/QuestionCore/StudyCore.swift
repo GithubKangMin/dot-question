@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 public struct DocumentPage: Equatable {
     public let page: Int?
