@@ -617,6 +617,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             writeLiveEvidence(["successful": successful, "ordinal": AnswerIndicator(choice: lastChoice, options: lastOptions)?.ordinal ?? 0,
                                "windowVisible": window.isVisible, "questionOCR": question.string,
                                "validatedAnswer": answer.string, "status": message,
+                               "parsedChoiceLabels": MCQParser.parse(question.string).choices.map { $0.label },
                                "provider": "local Ollama", "model": model.stringValue], filename: "live-result.json")
         }
     }
