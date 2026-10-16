@@ -8,6 +8,29 @@ private final class FlippedDocumentView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// Used only by --smoke-test screenshot evidence; uses the production icon renderers.
+private final class SmokeIconPreviewView: NSView {
+    override var isOpaque: Bool { true }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.white.setFill(); bounds.fill()
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 16), .foregroundColor: NSColor.black]
+        ("앱 아이콘 렌더링 · 시스템 메뉴바 캡처 아님" as NSString)
+            .draw(at: NSPoint(x: 20, y: 143), withAttributes: attributes)
+        let icons: [(String, NSImage)] = [
+            ("Wi-Fi형 · 보기 2", AnswerStatusIcon.wifi(bars: 2)),
+            ("배터리형 · 보기 2", AnswerStatusIcon.battery(percent: 20)),
+            ("고양이 · 활성 프레임", CharacterStatusIcon.image(style: .cat, active: true)),
+            ("피카츄 · 활성 프레임", CharacterStatusIcon.image(style: .pikachu, active: true))]
+        for (index, entry) in icons.enumerated() {
+            let x = CGFloat(index * 185 + 20)
+            entry.1.draw(in: NSRect(x: x + 35, y: 55, width: entry.1.size.width * 2,
+                                   height: entry.1.size.height * 2))
+            (entry.0 as NSString).draw(at: NSPoint(x: x, y: 24), withAttributes: attributes)
+        }
+    }
+}
+
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTextViewDelegate {
     private var statusItem: NSStatusItem!
     private var window: NSWindow!
@@ -29,6 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var captureButton: NSButton!
     private var sendButton: NSButton!
     private var cancelButton: NSButton!
+    private var apiConfirmationOpen = false
+    private var settingsPanel: NSStackView!
     private var busy = false
     private var generation = 0
     private var activeCapture = false
@@ -61,9 +86,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     private var armedEscapeKey: HotKey?
     private var armTimer: Timer?
     private var importing = false
-    private let capsLED = CapsLEDController()
-    private let ledOptIn = NSButton(checkboxWithTitle: "Caps Lock LED 신호 허용 (지원 키보드만)", target: nil, action: nil)
-    private let ledStatus = NSTextField(wrappingLabelWithString: "Caps Lock LED: 연결 확인 전 · macOS/키보드에 따라 지원되지 않을 수 있습니다.")
     private var animationTimer: Timer?
     private var lastChoice: String?
     private var animationStep = 0
@@ -75,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(applicationActivated(_:)), name: NSWorkspace.didActivateApplicationNotification, object: nil)
         NSApp.setActivationPolicy(.accessory)
         RuntimeConfiguration.preferences.register(defaults: ["menuAnswer": true, "quickMode": false])
+        if RuntimeConfiguration.isLiveTest {
+            RuntimeConfiguration.preferences.set(true, forKey: "quickMode")
+            RuntimeConfiguration.preferences.set(1, forKey: "menuStyle")
+            RuntimeConfiguration.preferences.set("qwen2.5:1.5b", forKey: "model")
+        }
         buildWindow()
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         statusItem.button?.title = "Q?"
@@ -95,12 +122,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         }
         let code = hotKey?.register(keyCode: shortcutKeyCode) ?? 0
         if code != 0 { status.stringValue = "단축키 등록 실패 (\(code)). 메뉴의 영역 캡처를 이용하세요." }
+        if RuntimeConfiguration.isLiveTest {
+            let ready: [String: Any] = ["hotkeyStatus": code, "screenCaptureAllowed": CGPreflightScreenCaptureAccess(),
+                                        "windowVisible": window.isVisible]
+            writeLiveEvidence(ready, filename: "app-ready.json")
+        }
         if let error = documents.loadError { documentStatus.stringValue = error }
         refreshDocuments()
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.capsLED.onStatusChange = { [weak self] message in self?.ledStatus.stringValue = message }
-        }
         if quickMode.state != .on || RuntimeConfiguration.isSmokeTest { showWindow() }
         if RuntimeConfiguration.isSmokeTest {
             Task { @MainActor in
@@ -109,11 +137,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                 print("SMOKE: window=\(self.window.isVisible), title=\(self.window.title), menu=\(self.statusItem.button?.title ?? "missing"), documents=\(self.documents.documents.count)")
                 print("SMOKE: isolated preferences/store; global shortcut, capture, clipboard and network unused")
                 fflush(stdout)
-                if CommandLine.arguments.contains("--probe-led") {
-                    await self.capsLED.probe()
-                    print("SMOKE: LED read-only available=\(self.capsLED.isAvailable), status=\(self.capsLED.status)")
-                    fflush(stdout)
-                }
                 if let index = CommandLine.arguments.firstIndex(of: "--smoke-image"),
                    CommandLine.arguments.indices.contains(index + 1),
                    let view = self.window.contentView,
@@ -155,33 +178,77 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         let data = try JSONSerialization.data(withJSONObject: payload)
         let result = try StructuredAnswerParser.parse(String(decoding: data, as: UTF8.self), question: prepared.question, sources: sources)
         answer.string = result.formattedText
+        groundedOnly.state = .on
         lastChoice = result.selectedChoice
         lastOptions = prepared.question.choices.map { $0.label }
         menuAnswer.state = .on
         renderMenuAnswer()
         status.stringValue = "CI 합성 자료 · 고정 응답 검증 완료 · 네트워크/API 호출 없음"
-        window.contentView?.layoutSubtreeIfNeeded()
+        // Capture only the laid-out viewport. Caching the whole scroll document
+        // includes clipped/offscreen regions which AppKit may leave transparent.
         func save(_ view: NSView, _ filename: String) throws {
             view.layoutSubtreeIfNeeded()
+            view.displayIfNeeded()
             guard let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
                 throw AppError(message: "Cannot render \(filename)")
             }
             view.cacheDisplay(in: view.bounds, to: bitmap)
-            guard let png = bitmap.representation(using: .png, properties: [:]), png.count > 100 else {
-                throw AppError(message: "Empty render \(filename)")
+            // Reject blank/mostly transparent renders; PNG byte size is not evidence.
+            var visible = 0, ink = 0, samples = 0
+            for y in stride(from: 0, to: bitmap.pixelsHigh, by: 3) {
+                for x in stride(from: 0, to: bitmap.pixelsWide, by: 3) {
+                    samples += 1
+                    guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
+                          color.alphaComponent > 0.9 else { continue }
+                    visible += 1
+                    if max(color.redComponent, color.greenComponent, color.blueComponent) < 0.7 { ink += 1 }
+                }
+            }
+            guard samples > 0, visible > samples * 9 / 10, ink > samples / 500 else {
+                throw AppError(message: "Blank or clipped render \(filename): visible=\(visible)/\(samples), ink=\(ink)")
+            }
+            guard let png = bitmap.representation(using: .png, properties: [:]) else {
+                throw AppError(message: "Cannot encode \(filename)")
             }
             try png.write(to: directory.appendingPathComponent(filename))
+            print("SCREENSHOT PIXELS: \(filename) visible=\(visible)/\(samples), ink=\(ink)")
         }
         guard let content = window.contentView,
-              let scroll = content.subviews.first as? NSScrollView,
-              let document = scroll.documentView,
-              let button = statusItem.button else { throw AppError(message: "Missing app views") }
-        try save(document, "macos-full-app-view.png")
-        document.scrollToVisible(answer.convert(answer.bounds, to: document))
+              let scroll = content.subviews.first as? NSScrollView else {
+            throw AppError(message: "Missing app viewport")
+        }
+        // Deterministic light appearance makes both text and template icon evidence legible.
+        window.appearance = NSAppearance(named: .aqua)
+        content.wantsLayer = true
+        content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+        guard let settingsToggle = (settingsPanel.superview as? NSStackView)?.arrangedSubviews
+            .compactMap({ $0 as? NSButton }).first(where: { $0.action == #selector(toggleSettings(_:)) }) else {
+            throw AppError(message: "Missing settings control")
+        }
+        settingsToggle.state = .on
+        settingsPanel.isHidden = false
         content.layoutSubtreeIfNeeded()
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        try save(content, "macos-settings-window-app-view.png")
+        settingsToggle.state = .off
+        settingsPanel.isHidden = true
+        content.layoutSubtreeIfNeeded()
+        scroll.contentView.scroll(to: .zero)
+        scroll.reflectScrolledClipView(scroll.contentView)
+        answer.scrollRangeToVisible(NSRange(location: 0, length: 0))
         try save(content, "macos-answer-window-app-view.png")
-        try save(button, "macos-status-button-app-view.png")
-        try "Real AppKit app views. Synthetic question, imported local source and validated fixed response. Not a desktop screenshot. Status-button image is the app's own view, not proof of OS menu-bar placement. No OCR, live model, API, clipboard, global shortcut or LED operation.\n".write(to: directory.appendingPathComponent("capture-context.txt"), atomically: true, encoding: .utf8)
+
+        // A real application-owned preview, never a fabricated OS menu bar.
+        let preview = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 180),
+                               styleMask: [.titled], backing: .buffered, defer: false)
+        preview.isReleasedWhenClosed = false
+        preview.appearance = NSAppearance(named: .aqua)
+        preview.contentView = SmokeIconPreviewView(frame: NSRect(x: 0, y: 0, width: 760, height: 180))
+        preview.orderFront(nil)
+        defer { preview.orderOut(nil) }
+        try save(preview.contentView!, "macos-app-icon-preview.png")
+        try "Real AppKit visible window view renders: settings expanded and compact question/answer. Synthetic imported source and validated fixed response, not a live AI result. Icon panel draws the existing app icon implementations; it is not an OS menu-bar capture or proof of placement. Pixel assertions reject blank/transparent artifacts. No OCR, live model, API, clipboard or global shortcut operation.\n".write(to: directory.appendingPathComponent("capture-context.txt"), atomically: true, encoding: .utf8)
         print("SCREENSHOTS: saved real AppKit views to \(directory.path)")
     }
     private func buildWindow() {
@@ -214,12 +281,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         root.addArrangedSubview(title)
         let intro = NSTextField(wrappingLabelWithString: "⌃⌥⌘R → 영역 선택 → OCR 확인·수정 → AI로 전송\n창은 일반 앱처럼 보이며 화면 공유에도 나타날 수 있습니다.")
         intro.textColor = .secondaryLabelColor; root.addArrangedSubview(intro)
+        let settingsToggle = NSButton(checkboxWithTitle: "설정 펼치기 · 모델 / 자료 / 캡처 / 답 표시", target: self, action: #selector(toggleSettings(_:)))
+        root.addArrangedSubview(settingsToggle)
+        settingsPanel = NSStackView()
+        settingsPanel.orientation = .vertical; settingsPanel.alignment = .leading; settingsPanel.spacing = 8
+        root.addArrangedSubview(settingsPanel)
+        settingsPanel.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+        settingsPanel.isHidden = true
         provider.addItems(withTitles: ["로컬 · Ollama", "API · OpenAI (유료)"])
         provider.target = self; provider.action = #selector(providerChanged)
-        root.addArrangedSubview(provider)
+        settingsPanel.addArrangedSubview(provider)
         let settings = NSStackView(views: [NSTextField(labelWithString: "서버"), endpoint, NSTextField(labelWithString: "모델"), model])
         settingsRow = settings
-        settings.spacing = 8; root.addArrangedSubview(settings)
+        settings.spacing = 8; settingsPanel.addArrangedSubview(settings)
         endpoint.widthAnchor.constraint(greaterThanOrEqualToConstant: 190).isActive = true
         model.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
         settings.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
@@ -229,17 +303,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         apiRow.spacing = 8
         apiModel.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
         apiKey.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
-        root.addArrangedSubview(apiRow)
+        settingsPanel.addArrangedSubview(apiRow)
         apiRow.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         privacy.font = .systemFont(ofSize: 12); privacy.textColor = .secondaryLabelColor
-        root.addArrangedSubview(privacy)
+        settingsPanel.addArrangedSubview(privacy)
         privacy.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         importButton = NSButton(title: "자료 가져오기", target: self, action: #selector(importDocuments))
         removeDocumentButton = NSButton(title: "선택 자료 삭제", target: self, action: #selector(removeDocument))
         let docsRow = NSStackView(views: [importButton, documentList, removeDocumentButton, groundedOnly]); docsRow.spacing = 8
         documentList.widthAnchor.constraint(equalToConstant: 220).isActive = true
-        root.addArrangedSubview(docsRow)
-        documentStatus.font = .systemFont(ofSize: 11); root.addArrangedSubview(documentStatus)
+        settingsPanel.addArrangedSubview(docsRow)
+        documentStatus.font = .systemFont(ofSize: 11); settingsPanel.addArrangedSubview(documentStatus)
         documentStatus.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
         shortcut.addItems(withTitles: ["⌃⌥⌘R", "⌃⌥⌘Space", "⌃⌥⌘Enter"])
         shortcut.selectItem(at: min(2, max(0, RuntimeConfiguration.preferences.integer(forKey: "shortcut"))))
@@ -247,31 +321,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         captureWidth.widthAnchor.constraint(equalToConstant: 60).isActive = true
         captureHeight.widthAnchor.constraint(equalToConstant: 60).isActive = true
         let captureSettings = NSStackView(views: [cursorMode, captureWidth, NSTextField(labelWithString: "×"), captureHeight, NSTextField(labelWithString: "pt"), shortcut, armedEnter]); captureSettings.spacing = 6
-        root.addArrangedSubview(captureSettings)
+        settingsPanel.addArrangedSubview(captureSettings)
         quickMode.state = RuntimeConfiguration.preferences.bool(forKey: "quickMode") ? .on : .off
         quickMode.target = self; quickMode.action = #selector(quickModeChanged)
-        root.addArrangedSubview(quickMode)
-        root.addArrangedSubview(NSTextField(wrappingLabelWithString: "빠른 모드는 로컬 Ollama만 사용합니다. 화면 기록 권한은 미리 허용하세요. API는 자동 전송하지 않습니다. 메뉴의 질문 창 열기로 설정·오류를 확인하세요."))
+        settingsPanel.addArrangedSubview(quickMode)
+        settingsPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "빠른 모드는 로컬 Ollama만 사용합니다. 화면 기록 권한은 미리 허용하세요. API는 자동 전송하지 않습니다. 메뉴의 질문 창 열기로 설정·오류를 확인하세요."))
         menuStyle.addItems(withTitles: ["숫자", "Wi-Fi형 막대 (1–5)", "배터리형 (번호 × 10%)"])
         menuStyle.target = self; menuStyle.action = #selector(outputModeChanged)
         let outputSettings = NSStackView(views: [autoCopy, menuAnswer]); outputSettings.spacing = 8
-        root.addArrangedSubview(outputSettings)
-        root.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "메뉴 답 표시 모양"), menuStyle]))
-        root.addArrangedSubview(NSTextField(wrappingLabelWithString: "앱 자체 답 표시입니다. 실제 Wi-Fi/배터리 상태가 아닙니다. 보기 순서 1–5 → 막대 1–5칸 (6–10은 숫자), 1–10 → 10–100%."))
+        settingsPanel.addArrangedSubview(outputSettings)
+        settingsPanel.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "메뉴 답 표시 모양"), menuStyle]))
+        settingsPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "앱 자체 답 표시입니다. 실제 Wi-Fi/배터리 상태가 아닙니다. 보기 순서 1–5 → 막대 1–5칸 (6–10은 숫자), 1–10 → 10–100%."))
         characterStyle.addItems(withTitles: ["캐릭터 끄기", "고양이 · 꼬리 흔들기", "피카츄 · 전기 펄스"])
         characterStyle.target = self; characterStyle.action = #selector(outputModeChanged)
         reduceMotion.target = self; reduceMotion.action = #selector(outputModeChanged)
-        root.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "메뉴 캐릭터"), characterStyle, reduceMotion]))
-        root.addArrangedSubview(NSTextField(wrappingLabelWithString: "검증된 보기 순서만큼 초당 1회, 최대 10회 움직인 뒤 선택한 메뉴 답 모양으로 복원됩니다. 메뉴 답 끄기 상태에서는 캐릭터와 번호를 유지합니다. 시스템 동작 줄이기도 따릅니다."))
-        ledOptIn.target = self; ledOptIn.action = #selector(ledPermissionChanged)
-        let probeLED = NSButton(title: "LED 지원 확인", target: self, action: #selector(probeLED))
-        let ledRow = NSStackView(views: [ledOptIn, probeLED]); ledRow.spacing = 8
-        root.addArrangedSubview(ledRow)
-        ledStatus.font = .systemFont(ofSize: 11)
-        root.addArrangedSubview(ledStatus)
-        ledStatus.widthAnchor.constraint(equalTo: root.widthAnchor).isActive = true
+        settingsPanel.addArrangedSubview(NSStackView(views: [NSTextField(labelWithString: "메뉴 캐릭터"), characterStyle, reduceMotion]))
+        settingsPanel.addArrangedSubview(NSTextField(wrappingLabelWithString: "검증된 보기 순서만큼 초당 1회, 최대 10회 움직인 뒤 선택한 메뉴 답 모양으로 복원됩니다. 메뉴 답 끄기 상태에서는 캐릭터와 번호를 유지합니다. 시스템 동작 줄이기도 따릅니다."))
         for checkbox in [menuAnswer] { checkbox.target = self; checkbox.action = #selector(outputModeChanged) }
-        root.addArrangedSubview(NSTextField(labelWithString: "Enter 준비를 켜면 단축키 후 10초 동안 Return을 캡처용으로 사용합니다. Esc로 해제. 표시는 화면 공유에 보일 수 있습니다."))
+        settingsPanel.addArrangedSubview(NSTextField(labelWithString: "Enter 준비를 켜면 단축키 후 10초 동안 Return을 캡처용으로 사용합니다. Esc로 해제. 표시는 화면 공유에 보일 수 있습니다."))
         root.addArrangedSubview(NSTextField(labelWithString: "질문 · OCR은 오인식할 수 있어요"))
         question.delegate = self
         let qScroll = textScroll(question, editable: true)
@@ -426,6 +493,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             ? "API 모드: 질문과 검색된 자료 발췌가 승인 후 OpenAI로 전송되며 사용량에 따라 과금됩니다. 키는 앱 메모리에만 유지됩니다. 민감한 정보는 제거하세요."
             : "로컬 모드: 신뢰하는 Ollama와 클라우드 비활성화 설정을 사용하세요. 이미지 대신 질문과 검색된 자료 발췌를 전송합니다."
     }
+    @objc private func toggleSettings(_ sender: NSButton) {
+        settingsPanel.isHidden = sender.state != .on
+        window.contentView?.layoutSubtreeIfNeeded()
+    }
     @objc private func clearAPIKey() { apiKey.stringValue = "" }
     @objc private func sendQuestion() { prepareQuestion(origin: .manual) }
     private func prepareQuestion(origin: RequestOrigin) {
@@ -469,7 +540,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             finish("API는 빠른 모드에서 자동 전송하지 않습니다."); return
         }
         setBusy(true)
+        let consentGeneration = generation
         if useAPI {
+            apiConfirmationOpen = true
+            defer { apiConfirmationOpen = false }
             let alert = NSAlert()
             alert.messageText = "OpenAI에 질문과 선택한 자료 발췌를 전송할까요?"
             let filenames = Set(prepared.sources.map { $0.filename }).sorted().joined(separator: ", ")
@@ -482,7 +556,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             preview.font = .systemFont(ofSize: 12)
             alert.accessoryView = scroll
             alert.addButton(withTitle: "전송 (유료)"); alert.addButton(withTitle: "취소")
-            guard alert.runModal() == .alertFirstButtonReturn else { setBusy(false); status.stringValue = "전송하지 않았습니다."; return }
+            let decision = alert.runModal()
+            guard generation == consentGeneration, !closingWindow else { return }
+            guard decision == .alertFirstButtonReturn else { setBusy(false); status.stringValue = "전송하지 않았습니다."; return }
         }
         generation += 1; let token = generation
         let completion: (Result<String, Error>) -> Void = { [weak self] result in
@@ -492,13 +568,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
                 do {
                     let result = try StructuredAnswerParser.parse(text, question: prepared.question, sources: prepared.sources)
                     self.answer.string = result.formattedText
-                    self.lastChoice = result.uncertainty == nil ? result.selectedChoice : nil
+                    self.lastChoice = result.confirmedChoice
                     self.showChoice(self.lastChoice, options: prepared.question.choices.map { $0.label })
-                    if self.ledOptIn.state == .on, let choice = self.lastChoice,
-                       let index = prepared.question.choices.firstIndex(where: { $0.label == choice }) {
-                        Task { @MainActor in await self.capsLED.pulse(count: index + 1, userOptedIn: true) }
+                    if self.autoCopy.state == .on, let copyText = result.automaticCopyText {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(copyText, forType: .string)
                     }
-                    if self.autoCopy.state == .on { self.copyAnswer() }
                     self.finish(self.lastChoice == nil && self.requestOrigin == .quick ? "확정된 선택 답이 없습니다. 질문 창에서 답변과 불확실성 설명을 확인하세요." : "답변 완료. 출처 표시는 원문 대조를 돕는 기능이며 정확성을 보증하지 않습니다.", successful: self.requestOrigin != .quick || self.lastChoice != nil)
                 } catch {
                     self.answer.string = "[형식/선택지/출처 검증 실패: 자동 복사와 번호 표시는 하지 않습니다.]\n\(error.localizedDescription)\n\n모델 원문 (미검증):\n\(text)"
@@ -532,6 +607,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             NSSound.beep()
         }
         if requestOrigin.shouldRevealWindow && !closingWindow { showWindow() }
+        if RuntimeConfiguration.isLiveTest {
+            writeLiveEvidence(["successful": successful, "ordinal": AnswerIndicator(choice: lastChoice, options: lastOptions)?.ordinal ?? 0,
+                               "windowVisible": window.isVisible, "questionOCR": question.string,
+                               "validatedAnswer": answer.string, "status": message,
+                               "provider": "local Ollama", "model": model.stringValue], filename: "live-result.json")
+        }
+    }
+    private func writeLiveEvidence(_ value: [String: Any], filename: String) {
+        guard let directory = RuntimeConfiguration.liveDirectory else { return }
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+                .write(to: directory.appendingPathComponent(filename), options: .atomic)
+        } catch { fputs("Live evidence write failed: \(error)\n", stderr) }
     }
     @objc private func quickModeChanged() {
         RuntimeConfiguration.preferences.set(quickMode.state == .on, forKey: "quickMode")
@@ -542,7 +631,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
     }
     @objc private func cancelWork() {
         resetOutput()
-        Task { @MainActor in await self.capsLED.cancel() }
         disarmReturn()
         guard !importing else { return }
         if activeCapture {
@@ -551,11 +639,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
             return
         }
         generation += 1; client.cancel(); apiClient.cancel()
+        if apiConfirmationOpen { NSApp.abortModal() }
         setBusy(false); status.stringValue = "취소했습니다. 늦게 도착한 답변은 표시하지 않습니다."; if requestOrigin.shouldRevealWindow && !closingWindow { showWindow() }
     }
     @objc private func copyAnswer() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(answer.string, forType: .string) }
     @objc private func clearContent() { cancelWork(); question.string = ""; answer.string = ""; resetOutput(); status.stringValue = "내용을 지웠습니다." }
     private func shortcutTriggered() {
+        if let directory = RuntimeConfiguration.liveDirectory {
+            try? "Real Carbon hotkey callback received\n".write(to: directory.appendingPathComponent("hotkey-received.txt"), atomically: true, encoding: .utf8)
+        }
         guard NSApp.modalWindow == nil else { NSSound.beep(); return }
         guard !busy else { NSSound.beep(); return }
         if armedEnter.state == .on { armReturn() } else { beginCapture(origin: quickMode.state == .on ? .quick : .manual) }
@@ -647,7 +739,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         catch { status.stringValue = error.localizedDescription }
     }
     private func resetOutput() {
-        Task { @MainActor in await self.capsLED.cancel() }
         stopCharacterAnimation(); lastChoice = nil; lastOptions = []; menuMessage = nil
         menuStatus.title = "대기 중 · 아직 답 없음"
         renderMenuAnswer()
@@ -732,22 +823,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTe
         animationTimer = timer
         RunLoop.main.add(timer, forMode: .common)
     }
-    @objc private func probeLED() {
-        disarmReturn()
-        Task { @MainActor in await self.capsLED.probe() }
-    }
-    @objc private func ledPermissionChanged() {
-        if ledOptIn.state == .off { Task { @MainActor in await self.capsLED.cancel() } }
-    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         resetOutput(); disarmReturn()
-        // No asynchronous restoration is needed unless a physical pulse is active.
-        guard capsLED.isPulsing else { return .terminateNow }
-        Task { @MainActor in
-            await self.capsLED.cancel()
-            sender.reply(toApplicationShouldTerminate: true)
-        }
-        return .terminateLater
+        return .terminateNow
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func windowWillClose(_ notification: Notification) { closingWindow = true; cancelWork(); window.orderOut(nil) }

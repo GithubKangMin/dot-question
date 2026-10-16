@@ -38,14 +38,19 @@ class SourceChecks(unittest.TestCase):
     def test_temporary_enter_and_output_guards(self):
         ui = (ROOT / 'Sources/DotQuestion/main.swift').read_text()
         hotkey = (ROOT / 'Sources/DotQuestion/HotKey.swift').read_text()
-        for token in ['NSApp.modalWindow == nil', 'Timer(timeInterval: 10', 'forMode: .common', 'armedReturnKey?.unregister()', 'armedEscapeKey?.unregister()', 'result.uncertainty == nil', 'StructuredAnswerParser.parse', 'await self.capsLED.cancel()']:
+        for token in ['NSApp.modalWindow == nil', 'Timer(timeInterval: 10', 'forMode: .common', 'armedReturnKey?.unregister()', 'armedEscapeKey?.unregister()', 'result.confirmedChoice', 'result.automaticCopyText', 'StructuredAnswerParser.parse']:
             self.assertIn(token, ui)
         self.assertIn('received.id == owner.identifier', hotkey)
-        self.assertIn('userOptedIn: true', ui)
-    def test_led_capability_guards(self):
-        led = (ROOT / 'Sources/DotQuestion/CapsLED.swift').read_text()
-        for token in ['#if canImport(CoreHID)', '#available(macOS 15.0', 'guard userOptedIn', 'original = try await backend.read()', 'try await backend.write(original)', 'await task.value']:
-            self.assertIn(token, led)
+    def test_consent_cancellation_and_compact_settings(self):
+        ui = (ROOT / 'Sources/DotQuestion/main.swift').read_text()
+        for token in ['let consentGeneration = generation', 'generation == consentGeneration, !closingWindow',
+                      'if apiConfirmationOpen { NSApp.abortModal() }', 'settingsPanel.isHidden = true']:
+            self.assertIn(token, ui)
+    def test_no_keyboard_hardware_features(self):
+        ui = (ROOT / 'Sources/DotQuestion/main.swift').read_text()
+        self.assertFalse((ROOT / 'Sources/DotQuestion/CapsLED.swift').exists())
+        for token in ['capsLED', 'ledOptIn', 'probeLED', 'CoreHID', '--probe-led']:
+            self.assertNotIn(token, ui)
     def test_answer_icon_contract(self):
         ui = (ROOT / 'Sources/DotQuestion/main.swift').read_text()
         core = (ROOT / 'Sources/QuestionCore/AnswerIndicator.swift').read_text()
@@ -102,6 +107,17 @@ class SourceChecks(unittest.TestCase):
         self.assertIn('NSUserNotificationCenter.default.deliver(notification)', finish)
         self.assertIn('resetOutput()', finish)
         self.assertTrue((ROOT / 'Tests/QuestionCoreTests/RequestOriginTests.swift').is_file())
+    def test_screenshot_evidence_uses_visible_views(self):
+        ui = (ROOT / 'Sources/DotQuestion/main.swift').read_text()
+        capture = ui[ui.index('private func saveSmokeScreenshots'):ui.index('private func buildWindow')]
+        for token in ['macos-settings-window-app-view.png', 'macos-answer-window-app-view.png',
+                      'macos-app-icon-preview.png', 'visible > samples * 9 / 10',
+                      'ink > samples / 500', 'settingsPanel.isHidden = false',
+                      'settingsPanel.isHidden = true', 'scroll.contentView.scroll(to: .zero)']:
+            self.assertIn(token, capture)
+        self.assertNotIn('try save(document,', capture)
+        self.assertNotIn('try save(button,', capture)
+        self.assertIn('앱 아이콘 렌더링 · 시스템 메뉴바 캡처 아님', ui)
     def test_no_bundled_binaries(self):
         for path in ROOT.rglob('*'):
             if any(part == 'dist' or part == '.build' or part.startswith('.build-') for part in path.relative_to(ROOT).parts):

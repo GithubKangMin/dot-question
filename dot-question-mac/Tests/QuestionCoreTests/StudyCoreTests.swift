@@ -15,6 +15,19 @@ final class StudyCoreTests: XCTestCase {
         return String(data: data, encoding: .utf8)!
     }
 
+    func testAutomaticOutputOnlyUsesValidatedCertainAnswers() throws {
+        let question = MCQParser.parse("광합성 에너지는?\n1. 빛\n2. 소리")
+        let certain = try StructuredAnswerParser.parse(response(choice: "1"), question: question, sources: [])
+        XCTAssertEqual(certain.confirmedChoice, "1")
+        XCTAssertEqual(certain.automaticCopyText, certain.formattedText)
+        let uncertain = try StructuredAnswerParser.parse(response(choice: "1", uncertainty: "OCR unclear"), question: question, sources: [])
+        XCTAssertNil(uncertain.confirmedChoice)
+        XCTAssertNil(uncertain.automaticCopyText)
+        for raw in [try response(choice: "9"), try response(choice: "1", citations: ["invented"])] {
+            XCTAssertThrowsError(try StructuredAnswerParser.parse(raw, question: question, sources: []))
+        }
+    }
+
     func testChunksPreservePagesAndStableIDs() {
         let pages = [DocumentPage(page: 1, text: "첫 페이지"), DocumentPage(page: 2, text: "두 번째 페이지")]
         let first = DocumentChunker.chunks(documentID: documentID, name: "교재.pdf", pages: pages)

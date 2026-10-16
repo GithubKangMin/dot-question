@@ -6,6 +6,21 @@ import Vision
 import QuestionCore
 @testable import DotQuestion
 
+private final class SyntheticFlowProtocol: URLProtocol {
+    static var response: Data = Data()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let body = request.url?.path == "/api/tags"
+            ? Data("{\"models\":[{\"name\":\"synthetic:latest\"}]}".utf8) : Self.response
+        let response = HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: body)
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 /// Only generated documents and bitmap images are used. These tests do not open
 /// the app, capture the desktop, access HID/clipboard/hotkeys, or contact a model.
 final class MacServiceTests: XCTestCase {
@@ -127,6 +142,51 @@ final class MacServiceTests: XCTestCase {
             completed.fulfill()
         }
         wait(for: [completed], timeout: 30)
+    }
+
+    func testSyntheticOCRToGroundedMockAnswerAndAutomaticOutput() throws {
+        let store = DocumentStore(directory: storeDirectory)
+        let source = try fixture("planets.txt", text: "Mars is called the Red Planet. Venus is another planet.")
+        try store.importDocument(source)
+        let image = try makeOCRImage(lines: ["Which planet is called the Red Planet?", "A. Mars", "B. Venus"])
+        let recognized = expectation(description: "Synthetic image OCR")
+        var recognizedText: String?
+        OCRService.recognize(image) { result in
+            do { recognizedText = try result.get() }
+            catch { XCTFail("OCR failed: \(error)") }
+            recognized.fulfill()
+        }
+        wait(for: [recognized], timeout: 30)
+        let text = try XCTUnwrap(recognizedText)
+        let sources = store.retrieve(query: text)
+        let prompt = try StudyPromptBuilder.build(question: text, sources: sources, requiresSources: true)
+        XCTAssertEqual(prompt.question.choices.map(\.label), ["A", "B"])
+        let citation = try XCTUnwrap(sources.first)
+        let payload: [String: Any] = ["selected_choice": "A", "answer": "Mars", "explanation": "The supplied text identifies Mars as the Red Planet.", "citations": [citation.id], "uncertainty": NSNull()]
+        let raw = String(decoding: try JSONSerialization.data(withJSONObject: payload), as: UTF8.self)
+        SyntheticFlowProtocol.response = try JSONSerialization.data(withJSONObject: ["response": raw])
+        defer { SyntheticFlowProtocol.response = Data() }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [SyntheticFlowProtocol.self]
+        let client = OllamaClient(configuration: configuration)
+        let completed = expectation(description: "Mock model and validated output")
+        var copiedText: String?
+        try client.answer(endpoint: "http://127.0.0.1:11434", model: "synthetic:latest", question: prompt.user, system: prompt.system) { result in
+            do {
+                let validated = try StructuredAnswerParser.parse(result.get(), question: prompt.question, sources: prompt.sources)
+                XCTAssertEqual(validated.confirmedChoice, "A")
+                XCTAssertEqual(AnswerIndicator(choice: validated.confirmedChoice, options: prompt.question.choices.map(\.label))?.ordinal, 1)
+                // Record the automatic-copy payload without touching a real pasteboard.
+                copiedText = validated.automaticCopyText
+                XCTAssertTrue(copiedText?.contains("planets.txt") == true)
+                XCTAssertTrue(copiedText?.contains("Mars") == true)
+            } catch { XCTFail("Pipeline failed: \(error)") }
+            completed.fulfill()
+        }
+        wait(for: [completed], timeout: 5)
+        withExtendedLifetime(client) {}
+        XCTAssertNotNil(copiedText)
+        XCTAssertThrowsError(try StudyPromptBuilder.build(question: "unrelatedquasarword", sources: store.retrieve(query: "unrelatedquasarword"), requiresSources: true))
     }
 
     func testSyntheticKoreanImageOCRWhenLanguageSupported() throws {

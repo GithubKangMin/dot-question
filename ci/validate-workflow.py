@@ -46,6 +46,17 @@ class WorkflowChecks(unittest.TestCase):
                 if step['uses'].startswith('actions/checkout@'):
                     self.assertIs(step['with']['persist-credentials'], False)
 
+    def test_real_recording_safety_and_no_fixtures(self):
+        script = (ROOT / 'ci/record-mac-live.sh').read_text()
+        self.assertLess(script.index('run_capture --probe'), script.index('curl --fail --location'))
+        for forbidden in ['tccutil', 'TCC.db', 'sudo ', 'osascript', 'launchctl']:
+            self.assertNotIn(forbidden, script)
+        self.assertIn('OLLAMA_NO_CLOUD=1', script)
+        self.assertIn('https://ollama.com/download/Ollama-darwin.zip', script)
+        runtime = (ROOT / 'dot-question-mac/Sources/DotQuestion/RuntimeConfiguration.swift').read_text()
+        self.assertIn('environment["GITHUB_ACTIONS"] == "true"', runtime)
+        self.assertIn('isSmokeTest || isLiveTest', runtime)
+
     def test_lipo_input_precedes_verify_arch_list(self):
         steps = self.data['jobs']['macos']['steps']
         package = next(step['run'] for step in steps if step.get('name', '').startswith('Package'))

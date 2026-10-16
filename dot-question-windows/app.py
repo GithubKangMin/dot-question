@@ -33,6 +33,7 @@ class Window(QMainWindow):
         self.remaining_frames = 0
         self.overlay = None
         self.capture_pending = False
+        self.capture_generation = 0
         self.quick_active = False
         self.last_error = None
         settings_dir = Path(os.environ.get("LOCALAPPDATA", str(Path.home() / ".local" / "share"))) / "DotQuestion"
@@ -185,11 +186,21 @@ class Window(QMainWindow):
             self.clear_signal(); self.status.setText('10초 내 Enter로 캡처 / Esc로 취소')
         else: self.status.setText('준비 해제')
 
+    def set_busy(self, busy):
+        self.busy = busy
+        for widget in (self.question, self.send, self.mode, self.grounded,
+                       self.endpoint, self.local_model, self.api_model, self.key):
+            widget.setEnabled(not busy)
+        if not busy:
+            api = self.mode.currentIndex() == 1
+            self.endpoint.setEnabled(not api); self.local_model.setEnabled(not api)
+            self.key.setEnabled(api); self.api_model.setEnabled(api)
+
     def run(self, fn, callback):
         if self.busy: return
         self.busy = True; self.cancelled = False; self.serial += 1
         serial = self.serial; self.callback = callback
-        self.question.setEnabled(False); self.send.setEnabled(False); self.mode.setEnabled(False)
+        self.set_busy(True)
         def work():
             try: result, error = fn(), None
             except Exception as exc: result, error = None, exc
@@ -199,7 +210,7 @@ class Window(QMainWindow):
 
     def completed(self, serial, value, error):
         if serial != self.serial or self.closing: return
-        self.busy = False; self.question.setEnabled(True); self.send.setEnabled(True); self.mode.setEnabled(True)
+        self.set_busy(False)
         callback = self.callback; self.callback = None
         if self.cancelled:
             self.quick_active = False
@@ -208,7 +219,10 @@ class Window(QMainWindow):
         callback(value)
 
     def cancel(self):
+        pending_manual = self.capture_pending and not self.quick_active
+        self.capture_generation += 1
         self.hk.disarm(); self.cancelled = True; self.capture_pending = False; self.clear_signal()
+        if pending_manual and not self.closing: self.reveal()
         if self.overlay:
             self.overlay.close(); self.overlay = None
             if not self.quick_active: self.reveal()
@@ -216,7 +230,8 @@ class Window(QMainWindow):
         self.status.setText('결과 표시 취소됨. 작업 종료까지 기다립니다. 이미 전송된 API 요청은 과금될 수 있습니다.' if self.busy else '취소됨')
 
     def clear(self):
-        if self.busy: self.cancel(); return
+        if self.busy or self.capture_pending or self.overlay:
+            self.cancel()
         self.question.clear(); self.answer.clear(); self.clear_signal()
 
     def capture(self, checked=False, *, from_hotkey=False):
@@ -229,9 +244,12 @@ class Window(QMainWindow):
             return
         self.capture_pending = True
         self.hide()
-        QTimer.singleShot(250, self.take_capture)
+        self.capture_generation += 1
+        generation = self.capture_generation
+        QTimer.singleShot(250, lambda: self.take_capture(generation))
 
-    def take_capture(self):
+    def take_capture(self, generation=None):
+        if generation is not None and generation != self.capture_generation: return
         if self.closing or not self.capture_pending: return
         self.capture_pending = False
         try:
@@ -322,7 +340,16 @@ class Window(QMainWindow):
                 raise ValueError('빠른 모드는 로컬 Ollama 전용입니다. API는 전송하지 않았습니다.')
             if api:
                 if not self.key.text().strip(): raise ValueError('API 키를 보안 입력칸에 입력하세요.')
-                if not self.consent(question, sources):
+                # A modal dialog runs a nested event loop: hotkeys, Cancel and
+                # Close can still arrive. Keep the request locked and check
+                # cancellation again before creating any network operation.
+                self.set_busy(True)
+                try:
+                    approved = self.consent(question, sources)
+                finally:
+                    self.set_busy(False)
+                if not approved or self.cancelled or self.closing:
+                    self.quick_active = False
                     self.status.setText('전송하지 않았습니다.'); return
                 client = OpenAIClient(model=self.api_model.text().strip())
                 session_key = self.key.text().strip()
@@ -345,7 +372,8 @@ class Window(QMainWindow):
             lines.append(f'[{source.id}] {source.citation_label}\n{source.text}')
         text = '\n\n'.join(lines); self.answer.setPlainText(text)
         self.status.setText('응답 형식/보기/출처 ID 검증 완료. 사실성은 직접 확인하세요.')
-        if self.autocopy.isChecked(): QApplication.clipboard().setText(text)
+        if self.autocopy.isChecked() and not result.uncertainty:
+            QApplication.clipboard().setText(text)
         self.current_order = result.choice_index if not result.uncertainty else None
         if self.quick_active and not self.current_order:
             self.error('확실한 선택 번호를 얻지 못했습니다. 창을 열어 답변을 검토하세요.', preserve_answer=True)

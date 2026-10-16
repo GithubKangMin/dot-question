@@ -65,6 +65,16 @@ jobs:
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
+      - name: Record actual desktop and global shortcut with a real local model
+        run: bash ../ci/record-mac-live.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: dot-question-macos-live-video
+          path: dot-question-mac/dist/live-video
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
 
   windows:
     if: github.event_name == 'push' || inputs.platform == 'windows' || inputs.platform == 'both'

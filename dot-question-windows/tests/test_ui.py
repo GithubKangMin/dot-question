@@ -273,5 +273,130 @@ class UISmokeTests(unittest.TestCase):
         self.assertIn('근거 발췌', self.window.answer.toPlainText())
 
 
+    def test_cancel_during_api_consent_never_dispatches(self):
+        self.window.mode.setCurrentIndex(1)
+        self.window.key.setText('synthetic-key')
+        self.window.question.setPlainText('synthetic question')
+        def cancel_inside_dialog(*_):
+            self.assertTrue(self.window.busy)
+            self.assertFalse(self.window.question.isEnabled())
+            self.window.cancel()
+            return True  # A queued OK must not override Cancel/Close.
+        with patch.object(self.window, 'consent', side_effect=cancel_inside_dialog), patch.object(gui, 'OpenAIClient') as client:
+            self.window.submit(); self.wait_for_idle()
+            client.assert_not_called()
+        self.assertIn('전송하지', self.window.status.text())
+
+    def test_capture_cancel_restores_manual_window_and_rejects_old_timer(self):
+        with patch.object(gui.QTimer, 'singleShot'), patch.object(self.window, 'reveal') as reveal, patch.object(gui, 'capture_cursor') as capture:
+            self.window.cursor.setChecked(True)
+            self.window.capture()
+            generation = self.window.capture_generation
+            self.window.cancel()
+            reveal.assert_called_once()
+            self.window.capture()
+            self.window.take_capture(generation)
+            capture.assert_not_called()
+            self.assertTrue(self.window.capture_pending)
+            self.window.cancel()
+
+    def test_clear_during_ocr_cannot_repopulate_question_or_send(self):
+        release = threading.Event()
+        self.window.question.setPlainText('old question')
+        self.window.quick_active = True
+        with patch.object(gui, 'OllamaClient') as client:
+            self.window.run(lambda: (release.wait(1), 'late OCR')[1], self.window.ocr_done)
+            self.window.clear(); release.set(); self.wait_for_idle()
+            client.assert_not_called()
+        self.assertEqual(self.window.question.toPlainText(), '')
+        self.assertEqual(self.window.answer.toPlainText(), '')
+
+    def test_clear_cancels_pending_capture(self):
+        with patch.object(gui.QTimer, 'singleShot'), patch.object(gui, 'capture_cursor') as capture:
+            self.window.question.setPlainText('old question')
+            self.window.capture()
+            self.window.clear()
+            self.window.take_capture()
+            capture.assert_not_called()
+        self.assertFalse(self.window.capture_pending)
+        self.assertEqual(self.window.question.toPlainText(), '')
+
+    def test_stale_worker_completion_cannot_replace_new_answer(self):
+        self.window.answer.setPlainText('current answer')
+        self.window.current_order = 2
+        self.window.completed(self.window.serial - 1, None, RuntimeError('old'))
+        self.assertEqual(self.window.answer.toPlainText(), 'current answer')
+        self.assertEqual(self.window.current_order, 2)
+
+    def test_synthetic_grounded_capture_to_validated_answer_and_clipboard(self):
+        import json
+        import core
+        from pathlib import Path
+        from PySide6.QtGui import QImage
+        document = Path(self.tmp.name) / 'synthetic-study.txt'
+        document.write_text('Synthetic mitosis produces two genetically identical daughter cells.', encoding='utf-8')
+        self.window.store.import_file(document)
+        self.window.grounded.setChecked(True)
+        self.window.quick_mode.setChecked(True)
+        self.window.autocopy.setChecked(True)
+        question = 'What does mitosis produce?\nA. Four different cells\nB. Two identical cells'
+        image = QImage(20, 20, QImage.Format.Format_RGB32)
+        calls = []
+        def fake_http(url, payload=None, **kwargs):
+            calls.append((url, payload))
+            if url.endswith('/api/tags'):
+                return {'models': [{'name': 'qwen3:4b-instruct', 'size': 100, 'digest': 'synthetic', 'details': {'format': 'gguf'}}]}
+            request = json.loads(payload['messages'][1]['content'])
+            self.assertEqual(request['question'], question)
+            self.assertEqual(request['allowed_choice_labels'], ['A', 'B'])
+            self.assertEqual(len(request['sources']), 1)
+            source_id = request['sources'][0]['id']
+            response = {'selected_choice': 'B', 'answer': 'Two identical daughter cells', 'explanation': 'The supplied study text states the result of mitosis.', 'citations': [source_id], 'uncertainty': None}
+            return {'done': True, 'message': {'content': json.dumps(response)}}
+        with patch.object(gui.QTimer, 'singleShot'), patch.object(gui, 'capture_cursor', return_value=image), patch.object(gui, 'ocr_image', return_value=question), patch.object(core, '_request_json', side_effect=fake_http), patch.object(gui.QMessageBox, 'warning') as warning:
+            self.window.capture(from_hotkey=True)
+            self.window.take_capture(); self.wait_for_idle()
+            warning.assert_not_called()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(self.window.current_order, 2)
+        self.assertIn('synthetic-study.txt', self.window.answer.toPlainText())
+        self.assertEqual(self.app.clipboard().text(), self.window.answer.toPlainText())
+
+    def test_grounded_no_hit_never_contacts_model(self):
+        import core
+        self.window.grounded.setChecked(True)
+        self.window.question.setPlainText('nonmatching synthetic question')
+        self.app.clipboard().setText('keep clipboard')
+        self.window.autocopy.setChecked(True)
+        with patch.object(core, '_request_json') as http, patch.object(gui.QMessageBox, 'warning') as warning:
+            self.window.submit(); self.wait_for_idle()
+            http.assert_not_called(); warning.assert_called_once()
+        self.assertEqual(self.app.clipboard().text(), 'keep clipboard')
+        self.assertIsNone(self.window.current_order)
+
+    def test_invalid_citation_fails_without_signal_or_autocopy(self):
+        import core
+        import json
+        self.window.question.setPlainText('Choose\nA. First\nB. Second')
+        self.window.autocopy.setChecked(True)
+        self.app.clipboard().setText('keep clipboard')
+        raw = {'selected_choice': 'A', 'answer': 'First', 'explanation': 'Synthetic explanation', 'citations': ['invented-source'], 'uncertainty': None}
+        with patch.object(core.OllamaClient, 'list_models', return_value=['qwen3:4b-instruct']), patch.object(core, '_request_json', return_value={'done': True, 'message': {'content': json.dumps(raw)}}), patch.object(gui.QMessageBox, 'warning') as warning:
+            self.window.submit(); self.wait_for_idle(); warning.assert_called_once()
+        self.assertEqual(self.window.answer.toPlainText(), '')
+        self.assertEqual(self.app.clipboard().text(), 'keep clipboard')
+        self.assertIsNone(self.window.current_order)
+
+    def test_uncertain_answer_keeps_clipboard_and_has_no_signal(self):
+        from core import validate_answer, parse_options
+        self.window.autocopy.setChecked(True)
+        self.app.clipboard().setText('keep clipboard')
+        result = validate_answer({'selected_choice': 'A', 'answer': 'Maybe first', 'explanation': 'OCR is ambiguous.', 'citations': [], 'uncertainty': 'Review OCR'}, parse_options('Choose\nA. First\nB. Second'), [])
+        self.window.answer_done(result, [])
+        self.assertIn('Review OCR', self.window.answer.toPlainText())
+        self.assertIsNone(self.window.current_order)
+        self.assertEqual(self.app.clipboard().text(), 'keep clipboard')
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -251,6 +251,9 @@ public struct StudyAnswer: Equatable {
     public let explanation: String
     public let citations: [DocumentChunk]
     public let uncertainty: String?
+    /// Only validated, unambiguous answers may drive automatic output.
+    public var confirmedChoice: String? { uncertainty == nil ? selectedChoice : nil }
+    public var automaticCopyText: String? { uncertainty == nil ? formattedText : nil }
     public var formattedText: String {
         var blocks: [String] = []
         if let choice = selectedChoice { blocks.append("선택지: \(choice)") }

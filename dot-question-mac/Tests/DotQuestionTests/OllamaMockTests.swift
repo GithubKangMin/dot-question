@@ -52,6 +52,36 @@ final class OllamaMockTests: XCTestCase {
         XCTAssertEqual(try result.get(), "synthetic answer")
         XCTAssertEqual(paths, ["/api/tags", "/api/generate"])
     }
+    func testCancellationDuringPreflightSuppressesCompletion() throws {
+        let api = client()
+        MockOllamaProtocol.handler = { request in
+            XCTAssertEqual(request.url?.path, "/api/tags")
+            return (200, Data("{\"models\":[{\"name\":\"synthetic:latest\"}]}".utf8))
+        }
+        let unexpected = expectation(description: "Cancelled callback must not be published")
+        unexpected.isInverted = true
+        try api.answer(endpoint: "http://127.0.0.1:11434", model: "synthetic:latest", question: "Synthetic", system: "") { _ in unexpected.fulfill() }
+        api.cancel()
+        wait(for: [unexpected], timeout: 0.3)
+        withExtendedLifetime(api) {}
+    }
+    func testCancellationDuringGenerationSuppressesLateResponse() throws {
+        let api = client()
+        let generated = expectation(description: "Generation reached")
+        MockOllamaProtocol.handler = { request in
+            if request.url?.path == "/api/tags" {
+                return (200, Data("{\"models\":[{\"name\":\"synthetic:latest\"}]}".utf8))
+            }
+            DispatchQueue.main.async { api.cancel(); generated.fulfill() }
+            return (200, Data("{\"response\":\"late synthetic answer\"}".utf8))
+        }
+        let unexpected = expectation(description: "Late answer must not be published")
+        unexpected.isInverted = true
+        try api.answer(endpoint: "http://127.0.0.1:11434", model: "synthetic:latest", question: "Synthetic", system: "") { _ in unexpected.fulfill() }
+        wait(for: [generated], timeout: 5)
+        wait(for: [unexpected], timeout: 0.3)
+        withExtendedLifetime(api) {}
+    }
     func testMissingAndRemoteModelsNeverGenerate() throws {
         for tags in ["{\"models\":[]}", "{\"models\":[{\"name\":\"synthetic:latest\",\"remote_host\":\"invalid.example\"}]}", "{\"models\":[{\"name\":\"synthetic:latest\",\"remote_model\":\"remote\"}]}"] {
             let (result, paths) = try run(tags: tags)

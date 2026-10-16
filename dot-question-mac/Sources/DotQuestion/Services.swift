@@ -144,7 +144,8 @@ final class OllamaClient {
         task?.resume()
     }
     private func generate(_ request: URLRequest, completion: @escaping (Result<String, Error>) -> Void) {
-        task = session.dataTask(with: request) { data, response, error in
+        let token = generation
+        task = session.dataTask(with: request) { [weak self] data, response, error in
             let result = Result<String, Error> {
                 if let error { throw error }
                 guard let http = response as? HTTPURLResponse else { throw AppError(message: "서버 응답이 없습니다.") }
@@ -156,7 +157,10 @@ final class OllamaClient {
                 guard let answer = decoded?.response, !answer.isEmpty else { throw AppError(message: "빈 응답을 받았습니다.") }
                 return answer
             }
-            DispatchQueue.main.async { completion(result) }
+            DispatchQueue.main.async {
+                guard let self, self.generation == token else { return }
+                completion(result)
+            }
         }
         task?.resume()
     }
